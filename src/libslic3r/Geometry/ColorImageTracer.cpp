@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
+#include <utility>
 
 namespace Slic3r {
 
@@ -172,6 +174,10 @@ bool ColorImageTracer::process_image(
         layer.extruder_id = (k % MAXIMUM_EXTRUDER_NUMBER) + 1;
         layer.height_mm = 2.0;
         layer.is_negative = false;
+        layer.offset_mm = 0.0;
+        layer.corner_style = CornerStyle::Sharp;
+        layer.face_profile = FaceProfile::Flat;
+        layer.face_height_mm = 0.8;
 
         cv::Mat mask = (label_mat == k);
         if (cv::countNonZero(mask) == 0) {
@@ -264,18 +270,28 @@ void ColorImageTracer::extrude_layer(ColorTraceLayer& layer)
         return;
     }
 
-    const double z_bottom = 0.0;
-    const double z_top = layer.height_mm;
+    // 1. Determine Clipper join type based on CornerStyle
+    ClipperLib::JoinType join_type = ClipperLib::jtMiter;
+    if (layer.corner_style == CornerStyle::Round) {
+        join_type = ClipperLib::jtRound;
+    } else if (layer.corner_style == CornerStyle::Beveled) {
+        join_type = ClipperLib::jtSquare;
+    }
 
-    // 1. Bottom and top caps using Slic3r's native triangulate_expolygons_3d
-    its_merge(layer.mesh, triangulate_expolygons_3d(layer.expolygons, z_bottom, NORMALS_DOWN));
-    its_merge(layer.mesh, triangulate_expolygons_3d(layer.expolygons, z_top, NORMALS_UP));
+    // 2. Apply XY tolerance offset (clearance gap < 0, perimeter choke > 0)
+    ExPolygons P0 = layer.expolygons;
+    if (std::abs(layer.offset_mm) > 1e-4) {
+        P0 = offset_ex(P0, static_cast<float>(scale_(layer.offset_mm)), join_type, 3.0);
+        if (P0.empty()) {
+            return;
+        }
+    }
 
-    // 2. Vertical side walls connecting perimeter loops with bit-exact float vertices
+    // Helper: Construct vertical wall quad strip between two Z heights
     auto create_wall_strip = [](const Polygon& poly, double lower_z, double upper_z) -> indexed_triangle_set {
         indexed_triangle_set ret;
         size_t offs = poly.points.size();
-        if (offs < 3) {
+        if (offs < 3 || upper_z <= lower_z) {
             return ret;
         }
 
@@ -298,14 +314,172 @@ void ColorImageTracer::extrude_layer(ColorTraceLayer& layer)
         return ret;
     };
 
-    for (const ExPolygon& expoly : layer.expolygons) {
-        its_merge(layer.mesh, create_wall_strip(expoly.contour, z_bottom, z_top));
-        for (const Polygon& hole : expoly.holes) {
-            its_merge(layer.mesh, create_wall_strip(hole, z_bottom, z_top));
+    // Helper: Construct sloping transition band between two concentric polygon slices
+    auto add_sloping_band = [&](indexed_triangle_set& dst_mesh, const ExPolygons& p_lower, const ExPolygons& p_upper, double z_lower, double z_upper) {
+        if (p_lower.empty()) return;
+        ExPolygons band_expolys = diff_ex(p_lower, p_upper);
+        if (band_expolys.empty()) return;
+
+        for (const ExPolygon& band_poly : band_expolys) {
+            std::set<std::pair<coord_t, coord_t>> upper_pts;
+            for (const Polygon& hole : band_poly.holes) {
+                for (const Point& pt : hole.points) {
+                    upper_pts.insert({pt.x(), pt.y()});
+                }
+            }
+
+            std::vector<Vec3d> tris = triangulate_expolygon_3d(band_poly, 0.0, NORMALS_UP);
+            if (tris.empty()) continue;
+
+            size_t base_idx = dst_mesh.vertices.size();
+            dst_mesh.vertices.reserve(dst_mesh.vertices.size() + tris.size());
+            dst_mesh.indices.reserve(dst_mesh.indices.size() + tris.size() / 3);
+
+            for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+                for (size_t v_idx = 0; v_idx < 3; ++v_idx) {
+                    const Vec3d& pt3d = tris[t + v_idx];
+                    coord_t cx = static_cast<coord_t>(std::round(scale_(pt3d.x())));
+                    coord_t cy = static_cast<coord_t>(std::round(scale_(pt3d.y())));
+                    float z_val = static_cast<float>((upper_pts.count({cx, cy}) > 0) ? z_upper : z_lower);
+                    dst_mesh.vertices.emplace_back(static_cast<float>(pt3d.x()), static_cast<float>(pt3d.y()), z_val);
+                }
+                dst_mesh.indices.emplace_back(static_cast<int>(base_idx + t),
+                                              static_cast<int>(base_idx + t + 1),
+                                              static_cast<int>(base_idx + t + 2));
+            }
+        }
+    };
+
+    // Helper: Add vertical walls for an ExPolygons set
+    auto add_vertical_walls = [&](const ExPolygons& polys, double z_lo, double z_hi) {
+        if (z_hi <= z_lo) return;
+        for (const ExPolygon& expoly : polys) {
+            its_merge(layer.mesh, create_wall_strip(expoly.contour, z_lo, z_hi));
+            for (const Polygon& hole : expoly.holes) {
+                its_merge(layer.mesh, create_wall_strip(hole, z_lo, z_hi));
+            }
+        }
+    };
+
+    // 3. Bottom cap at Z = 0 with downward normal
+    its_merge(layer.mesh, triangulate_expolygons_3d(P0, 0.0, NORMALS_DOWN));
+
+    // 4. Construct 3D body based on requested FaceProfile
+    if (layer.face_profile == FaceProfile::Flat || layer.face_height_mm <= 0.001) {
+        // Standard flat extrusion
+        add_vertical_walls(P0, 0.0, layer.height_mm);
+        its_merge(layer.mesh, triangulate_expolygons_3d(P0, layer.height_mm, NORMALS_UP));
+    }
+    else if (layer.face_profile == FaceProfile::Chamfer) {
+        // 45-degree angular beveled shoulder around top perimeter
+        double h_f = std::clamp(layer.face_height_mm, 0.05, layer.height_mm * 0.95);
+        double z_base = std::max(0.0, layer.height_mm - h_f);
+
+        add_vertical_walls(P0, 0.0, z_base);
+
+        ExPolygons P_top = offset_ex(P0, static_cast<float>(-scale_(h_f)), join_type, 3.0);
+        add_sloping_band(layer.mesh, P0, P_top, z_base, layer.height_mm);
+
+        if (!P_top.empty()) {
+            its_merge(layer.mesh, triangulate_expolygons_3d(P_top, layer.height_mm, NORMALS_UP));
+        }
+    }
+    else if (layer.face_profile == FaceProfile::Fillet) {
+        // Quarter-circle rounded shoulder
+        double h_f = std::clamp(layer.face_height_mm, 0.05, layer.height_mm * 0.95);
+        double z_base = std::max(0.0, layer.height_mm - h_f);
+
+        add_vertical_walls(P0, 0.0, z_base);
+
+        const int NUM_STEPS = 4;
+        ExPolygons P_curr = P0;
+        double z_curr = z_base;
+
+        for (int s = 1; s <= NUM_STEPS; ++s) {
+            double angle = (3.14159265358979323846 / 2.0) * (static_cast<double>(s) / NUM_STEPS);
+            double z_next = z_base + h_f * std::sin(angle);
+            double inset_dist = h_f * (1.0 - std::cos(angle));
+
+            ExPolygons P_next = offset_ex(P0, static_cast<float>(-scale_(inset_dist)), join_type, 3.0);
+            add_sloping_band(layer.mesh, P_curr, P_next, z_curr, z_next);
+
+            P_curr = std::move(P_next);
+            z_curr = z_next;
+            if (P_curr.empty()) break;
+        }
+
+        if (!P_curr.empty()) {
+            its_merge(layer.mesh, triangulate_expolygons_3d(P_curr, layer.height_mm, NORMALS_UP));
+        }
+    }
+    else if (layer.face_profile == FaceProfile::Peaked) {
+        // Straight-skeleton hipped roof / pyramid rising to ridges and peaks
+        double h_f = std::clamp(layer.face_height_mm, 0.05, layer.height_mm * 0.95);
+        double z_base = std::max(0.0, layer.height_mm - h_f);
+
+        add_vertical_walls(P0, 0.0, z_base);
+
+        const int MAX_STEPS = 8;
+        double step_delta = std::max(0.15, h_f / 5.0);
+
+        std::vector<ExPolygons> slices;
+        slices.push_back(P0);
+
+        while (static_cast<int>(slices.size()) <= MAX_STEPS) {
+            ExPolygons next_s = offset_ex(slices.back(), static_cast<float>(-scale_(step_delta)), join_type, 3.0);
+            if (next_s.empty()) break;
+            slices.push_back(std::move(next_s));
+        }
+
+        size_t M = slices.size() - 1;
+        if (M == 0) {
+            its_merge(layer.mesh, triangulate_expolygons_3d(P0, layer.height_mm, NORMALS_UP));
+        } else {
+            for (size_t s = 0; s < M; ++s) {
+                double z_s = z_base + h_f * (static_cast<double>(s) / M);
+                double z_s_next = z_base + h_f * (static_cast<double>(s + 1) / M);
+                add_sloping_band(layer.mesh, slices[s], slices[s + 1], z_s, z_s_next);
+            }
+            if (!slices.back().empty()) {
+                its_merge(layer.mesh, triangulate_expolygons_3d(slices.back(), layer.height_mm, NORMALS_UP));
+            }
+        }
+    }
+    else if (layer.face_profile == FaceProfile::Bubbled) {
+        // Inflated spherical dome / pillow crown
+        double h_f = std::clamp(layer.face_height_mm, 0.05, layer.height_mm * 0.95);
+        double z_base = std::max(0.0, layer.height_mm - h_f);
+
+        add_vertical_walls(P0, 0.0, z_base);
+
+        const int MAX_STEPS = 8;
+        double step_delta = std::max(0.15, h_f / 5.0);
+
+        std::vector<ExPolygons> slices;
+        slices.push_back(P0);
+
+        while (static_cast<int>(slices.size()) <= MAX_STEPS) {
+            ExPolygons next_s = offset_ex(slices.back(), static_cast<float>(-scale_(step_delta)), join_type, 3.0);
+            if (next_s.empty()) break;
+            slices.push_back(std::move(next_s));
+        }
+
+        size_t M = slices.size() - 1;
+        if (M == 0) {
+            its_merge(layer.mesh, triangulate_expolygons_3d(P0, layer.height_mm, NORMALS_UP));
+        } else {
+            for (size_t s = 0; s < M; ++s) {
+                double z_s = z_base + h_f * std::sin((3.14159265358979323846 / 2.0) * (static_cast<double>(s) / M));
+                double z_s_next = z_base + h_f * std::sin((3.14159265358979323846 / 2.0) * (static_cast<double>(s + 1) / M));
+                add_sloping_band(layer.mesh, slices[s], slices[s + 1], z_s, z_s_next);
+            }
+            if (!slices.back().empty()) {
+                its_merge(layer.mesh, triangulate_expolygons_3d(slices.back(), layer.height_mm, NORMALS_UP));
+            }
         }
     }
 
-    // 3. Weld matching float vertices and remove degenerate elements to ensure 100% watertight manifold mesh
+    // 5. Weld matching float vertices and remove degenerate elements for 100% watertight manifold mesh
     its_merge_vertices(layer.mesh);
     its_remove_degenerate_faces(layer.mesh);
     its_compactify_vertices(layer.mesh);

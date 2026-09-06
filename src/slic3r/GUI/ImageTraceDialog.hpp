@@ -10,6 +10,7 @@
 #include <wx/textctrl.h>
 #include <wx/panel.h>
 #include <wx/radiobut.h>
+#include <wx/choice.h>
 #include <wx/image.h>
 #include <wx/bitmap.h>
 #include <wx/colour.h>
@@ -65,6 +66,7 @@ private:
     void on_export_only(wxCommandEvent& evt);
     void on_ok(wxCommandEvent& evt);
     bool save_stls();
+    void sync_layers_from_grid();
 
     wxFilePickerCtrl*   m_file_picker{nullptr};
     wxDirPickerCtrl*    m_dir_picker{nullptr};
@@ -73,6 +75,12 @@ private:
     wxSpinCtrlDouble*   m_spin_height{nullptr};
     wxSpinCtrlDouble*   m_spin_smoothing{nullptr};
     wxSpinCtrl*         m_spin_min_area{nullptr};
+
+    wxSpinCtrlDouble*   m_spin_default_offset{nullptr};
+    wxChoice*           m_choice_default_corner{nullptr};
+    wxChoice*           m_choice_default_face{nullptr};
+    wxSpinCtrlDouble*   m_spin_default_face_h{nullptr};
+
     wxButton*           m_btn_trace{nullptr};
     wxGrid*             m_grid{nullptr};
 
@@ -81,9 +89,9 @@ private:
     wxRadioButton*      m_radio_original{nullptr};
     wxStaticText*       m_lbl_preview_info{nullptr};
 
-    std::vector<wxColour>       m_loaded_filaments;
-    std::vector<ColorTraceLayer> m_layers;
-    std::vector<std::string>    m_exported_stl_paths;
+    std::vector<wxColour>        m_loaded_filaments;
+    std::vector<ColorTraceLayer>  m_layers;
+    std::vector<std::string>     m_exported_stl_paths;
 };
 
 } // namespace GUI

@@ -171,7 +171,7 @@ void ImagePreviewCanvas::on_paint(wxPaintEvent&)
     } else {
         // Placeholder instructions
         dc.SetTextForeground(wxColour(145, 150, 160));
-        wxString msg = _L("Embedded Image Preview Window\n\n1. Select an image file (.png, .jpg, etc.)\n2. Click 'Trace & Preview'\n3. Segmented color layers will appear here");
+        wxString msg = _L("Embedded Image Preview Window\n\n1. Select an image file (.png, .jpg, etc.)\n2. Set Tracing & Tolerance Offset parameters\n3. Click 'Trace & Preview'");
         wxCoord tw = 0, th = 0;
         dc.GetMultiLineTextExtent(msg, &tw, &th);
         dc.DrawText(msg, (sz.x - tw) / 2, (sz.y - th) / 2);
@@ -193,12 +193,12 @@ static wxString get_default_stl_dir()
 
 ImageTraceDialog::ImageTraceDialog(wxWindow* parent, const std::vector<wxColour>& loaded_filaments)
     : wxDialog(parent, wxID_ANY, _L("Native Image Vectorization & 3D Extrusion"),
-               wxDefaultPosition, wxSize(1080, 740),
+               wxDefaultPosition, wxSize(1220, 780),
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
     , m_loaded_filaments(loaded_filaments)
 {
     init_ui();
-    SetMinSize(wxSize(920, 620));
+    SetMinSize(wxSize(1020, 660));
 }
 
 void ImageTraceDialog::init_ui()
@@ -214,8 +214,8 @@ void ImageTraceDialog::init_ui()
     auto* left_sizer = new wxBoxSizer(wxVERTICAL);
 
     // 1. Parameter Settings Group
-    auto* settings_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Tracing Parameters"));
-    auto* grid_sizer = new wxFlexGridSizer(7, 2, 6, 10);
+    auto* settings_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Tracing & Offset Parameters"));
+    auto* grid_sizer = new wxFlexGridSizer(11, 2, 5, 10);
     grid_sizer->AddGrowableCol(1, 1);
 
     // Input Image File Selector
@@ -240,7 +240,7 @@ void ImageTraceDialog::init_ui()
     grid_sizer->Add(m_spin_width, 0, wxEXPAND);
 
     // Default Base Height (mm)
-    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Default Height (mm):")), 0, wxALIGN_CENTER_VERTICAL);
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Base Height (mm):")), 0, wxALIGN_CENTER_VERTICAL);
     m_spin_height = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0.1, 200.0, 2.0, 0.2);
     grid_sizer->Add(m_spin_height, 0, wxEXPAND);
 
@@ -255,6 +255,40 @@ void ImageTraceDialog::init_ui()
     m_spin_min_area = new wxSpinCtrl(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100000, 5);
     m_spin_min_area->SetToolTip(_L("Minimum pixel area to preserve fine details (default 5 preserves small text & pupils)"));
     grid_sizer->Add(m_spin_min_area, 0, wxEXPAND);
+
+    // Tolerance Offset (XY Inset/Outset)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Default Offset (mm):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_default_offset = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, -5.0, 5.0, 0.0, 0.05);
+    m_spin_default_offset->SetToolTip(_L("XY tolerance offset: Negative for inlay/fit clearance gap (e.g. -0.15mm), Positive for perimeter overlap choke"));
+    grid_sizer->Add(m_spin_default_offset, 0, wxEXPAND);
+
+    // Corner Style
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Default Corner Style:")), 0, wxALIGN_CENTER_VERTICAL);
+    wxArrayString corner_opts;
+    corner_opts.Add(_L("Sharp (Miter)"));
+    corner_opts.Add(_L("Round (Fillet)"));
+    corner_opts.Add(_L("Beveled (Chamfer)"));
+    m_choice_default_corner = new wxChoice(settings_box->GetStaticBox(), wxID_ANY, wxDefaultPosition, wxDefaultSize, corner_opts);
+    m_choice_default_corner->SetSelection(0);
+    grid_sizer->Add(m_choice_default_corner, 0, wxEXPAND);
+
+    // Face Profile
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Default Face Profile:")), 0, wxALIGN_CENTER_VERTICAL);
+    wxArrayString face_opts;
+    face_opts.Add(_L("Flat (Planar)"));
+    face_opts.Add(_L("Chamfer (Beveled Shoulder)"));
+    face_opts.Add(_L("Fillet (Rounded Shoulder)"));
+    face_opts.Add(_L("Peaked (Pyramid Roof)"));
+    face_opts.Add(_L("Bubbled (Inflated Dome)"));
+    m_choice_default_face = new wxChoice(settings_box->GetStaticBox(), wxID_ANY, wxDefaultPosition, wxDefaultSize, face_opts);
+    m_choice_default_face->SetSelection(0);
+    grid_sizer->Add(m_choice_default_face, 0, wxEXPAND);
+
+    // Face Feature Height (mm)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Face Contour H (mm):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_default_face_h = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0.1, 50.0, 0.8, 0.1);
+    m_spin_default_face_h->SetToolTip(_L("Height or depth of chamfer, fillet, pyramid peak, or dome curve"));
+    grid_sizer->Add(m_spin_default_face_h, 0, wxEXPAND);
 
     // STL Export Directory
     grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Save STLs To:")), 0, wxALIGN_CENTER_VERTICAL);
@@ -274,22 +308,30 @@ void ImageTraceDialog::init_ui()
 
     left_sizer->Add(settings_box, 0, wxEXPAND | wxALL, 6);
 
-    // 2. Detected Layers Grid
-    auto* layers_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Detected Color Layers"));
+    // 2. Detected Layers Grid (9 Columns with full parametric offset & face control)
+    auto* layers_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Detected Color Layers (Per-Layer Parameters)"));
 
     m_grid = new wxGrid(layers_box->GetStaticBox(), wxID_ANY);
-    m_grid->CreateGrid(0, 5);
-    m_grid->SetColLabelValue(0, _L("Color Swatch"));
+    m_grid->CreateGrid(0, 9);
+    m_grid->SetColLabelValue(0, _L("Swatch"));
     m_grid->SetColLabelValue(1, _L("Extruder"));
-    m_grid->SetColLabelValue(2, _L("Height (mm)"));
-    m_grid->SetColLabelValue(3, _L("Negative"));
-    m_grid->SetColLabelValue(4, _L("Active"));
+    m_grid->SetColLabelValue(2, _L("Height"));
+    m_grid->SetColLabelValue(3, _L("Offset (mm)"));
+    m_grid->SetColLabelValue(4, _L("Corners"));
+    m_grid->SetColLabelValue(5, _L("Face"));
+    m_grid->SetColLabelValue(6, _L("Face H"));
+    m_grid->SetColLabelValue(7, _L("Negative"));
+    m_grid->SetColLabelValue(8, _L("Active"));
 
-    m_grid->SetColSize(0, 85);
-    m_grid->SetColSize(1, 75);
-    m_grid->SetColSize(2, 85);
-    m_grid->SetColSize(3, 85);
-    m_grid->SetColSize(4, 60);
+    m_grid->SetColSize(0, 60);
+    m_grid->SetColSize(1, 60);
+    m_grid->SetColSize(2, 65);
+    m_grid->SetColSize(3, 75);
+    m_grid->SetColSize(4, 75);
+    m_grid->SetColSize(5, 75);
+    m_grid->SetColSize(6, 65);
+    m_grid->SetColSize(7, 65);
+    m_grid->SetColSize(8, 50);
 
     layers_box->Add(m_grid, 1, wxEXPAND | wxALL, 4);
     left_sizer->Add(layers_box, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
@@ -391,6 +433,10 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
     int min_area_px = m_spin_min_area->GetValue();
     double default_height = m_spin_height->GetValue();
     double smooth_px = m_spin_smoothing->GetValue();
+    double default_offset = m_spin_default_offset->GetValue();
+    CornerStyle default_corner = static_cast<CornerStyle>(m_choice_default_corner->GetSelection());
+    FaceProfile default_face = static_cast<FaceProfile>(m_choice_default_face->GetSelection());
+    double default_face_h = m_spin_default_face_h->GetValue();
 
     wxBusyCursor wait;
     std::vector<unsigned char> preview_rgb;
@@ -445,9 +491,13 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
         }
     }
 
-    // Apply default base height to all layers
+    // Apply default parameters to all layers and extrude initial meshes
     for (auto& layer : m_layers) {
         layer.height_mm = default_height;
+        layer.offset_mm = default_offset;
+        layer.corner_style = default_corner;
+        layer.face_profile = default_face;
+        layer.face_height_mm = default_face_h;
         ColorImageTracer::extrude_layer(layer);
     }
 
@@ -457,6 +507,18 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
     }
 
     m_grid->AppendRows(static_cast<int>(m_layers.size()));
+
+    wxArrayString corner_choices;
+    corner_choices.Add("Sharp");
+    corner_choices.Add("Round");
+    corner_choices.Add("Bevel");
+
+    wxArrayString face_choices;
+    face_choices.Add("Flat");
+    face_choices.Add("Chamfer");
+    face_choices.Add("Fillet");
+    face_choices.Add("Peaked");
+    face_choices.Add("Bubbled");
 
     for (int i = 0; i < static_cast<int>(m_layers.size()); ++i) {
         const auto& layer = m_layers[i];
@@ -476,18 +538,97 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
         m_grid->SetCellRenderer(i, 2, new wxGridCellFloatRenderer(4, 2));
         m_grid->SetCellValue(i, 2, wxString::Format("%.2f", layer.height_mm));
 
-        // Column 3: Part Type ("Part" vs "Negative Volume / Cutter")
-        m_grid->SetCellEditor(i, 3, new wxGridCellBoolEditor());
-        m_grid->SetCellRenderer(i, 3, new wxGridCellBoolRenderer());
-        m_grid->SetCellValue(i, 3, layer.is_negative ? "1" : "0");
+        // Column 3: Tolerance Offset (mm)
+        m_grid->SetCellEditor(i, 3, new wxGridCellFloatEditor(4, 2));
+        m_grid->SetCellRenderer(i, 3, new wxGridCellFloatRenderer(4, 2));
+        m_grid->SetCellValue(i, 3, wxString::Format("%.2f", layer.offset_mm));
 
-        // Column 4: Enabled/Active checkbox
-        m_grid->SetCellEditor(i, 4, new wxGridCellBoolEditor());
-        m_grid->SetCellRenderer(i, 4, new wxGridCellBoolRenderer());
-        m_grid->SetCellValue(i, 4, "1");
+        // Column 4: Corner Style (Sharp, Round, Bevel)
+        m_grid->SetCellEditor(i, 4, new wxGridCellChoiceEditor(corner_choices));
+        m_grid->SetCellValue(i, 4, (layer.corner_style == CornerStyle::Round) ? "Round" :
+                                   (layer.corner_style == CornerStyle::Beveled) ? "Bevel" : "Sharp");
+
+        // Column 5: Face Profile (Flat, Chamfer, Fillet, Peaked, Bubbled)
+        m_grid->SetCellEditor(i, 5, new wxGridCellChoiceEditor(face_choices));
+        wxString face_str = "Flat";
+        if (layer.face_profile == FaceProfile::Chamfer) face_str = "Chamfer";
+        else if (layer.face_profile == FaceProfile::Fillet) face_str = "Fillet";
+        else if (layer.face_profile == FaceProfile::Peaked) face_str = "Peaked";
+        else if (layer.face_profile == FaceProfile::Bubbled) face_str = "Bubbled";
+        m_grid->SetCellValue(i, 5, face_str);
+
+        // Column 6: Face Contour Height (mm)
+        m_grid->SetCellEditor(i, 6, new wxGridCellFloatEditor(4, 2));
+        m_grid->SetCellRenderer(i, 6, new wxGridCellFloatRenderer(4, 2));
+        m_grid->SetCellValue(i, 6, wxString::Format("%.2f", layer.face_height_mm));
+
+        // Column 7: Part Type ("Part" vs "Negative Volume / Cutter")
+        m_grid->SetCellEditor(i, 7, new wxGridCellBoolEditor());
+        m_grid->SetCellRenderer(i, 7, new wxGridCellBoolRenderer());
+        m_grid->SetCellValue(i, 7, layer.is_negative ? "1" : "0");
+
+        // Column 8: Enabled/Active checkbox
+        m_grid->SetCellEditor(i, 8, new wxGridCellBoolEditor());
+        m_grid->SetCellRenderer(i, 8, new wxGridCellBoolRenderer());
+        m_grid->SetCellValue(i, 8, "1");
     }
 
     m_grid->Refresh();
+}
+
+void ImageTraceDialog::sync_layers_from_grid()
+{
+    if (m_grid->IsCellEditControlEnabled()) {
+        m_grid->DisableCellEditControl();
+    }
+    m_grid->SaveEditControlValue();
+
+    for (int i = 0; i < static_cast<int>(m_layers.size()) && i < m_grid->GetNumberRows(); ++i) {
+        long ext_id = 1;
+        m_grid->GetCellValue(i, 1).ToLong(&ext_id);
+        m_layers[i].extruder_id = std::clamp(static_cast<int>(ext_id), 1, 16);
+
+        double h = 2.0;
+        m_grid->GetCellValue(i, 2).ToDouble(&h);
+        if (h <= 0.0) h = 0.2;
+
+        double offset = 0.0;
+        m_grid->GetCellValue(i, 3).ToDouble(&offset);
+
+        wxString corner_str = m_grid->GetCellValue(i, 4).Lower();
+        CornerStyle corner = CornerStyle::Sharp;
+        if (corner_str.Contains("round")) corner = CornerStyle::Round;
+        else if (corner_str.Contains("bevel")) corner = CornerStyle::Beveled;
+
+        wxString face_str = m_grid->GetCellValue(i, 5).Lower();
+        FaceProfile face = FaceProfile::Flat;
+        if (face_str.Contains("chamfer")) face = FaceProfile::Chamfer;
+        else if (face_str.Contains("fillet")) face = FaceProfile::Fillet;
+        else if (face_str.Contains("peak")) face = FaceProfile::Peaked;
+        else if (face_str.Contains("bubble")) face = FaceProfile::Bubbled;
+
+        double face_h = 0.8;
+        m_grid->GetCellValue(i, 6).ToDouble(&face_h);
+
+        wxString neg_val = m_grid->GetCellValue(i, 7);
+        m_layers[i].is_negative = (neg_val == "1" || neg_val.Lower() == "true");
+
+        bool geom_changed = (std::abs(m_layers[i].height_mm - h) > 0.001 ||
+                             std::abs(m_layers[i].offset_mm - offset) > 0.001 ||
+                             m_layers[i].corner_style != corner ||
+                             m_layers[i].face_profile != face ||
+                             std::abs(m_layers[i].face_height_mm - face_h) > 0.001);
+
+        m_layers[i].height_mm = h;
+        m_layers[i].offset_mm = offset;
+        m_layers[i].corner_style = corner;
+        m_layers[i].face_profile = face;
+        m_layers[i].face_height_mm = face_h;
+
+        if (geom_changed || m_layers[i].mesh.empty()) {
+            ColorImageTracer::extrude_layer(m_layers[i]);
+        }
+    }
 }
 
 bool ImageTraceDialog::save_stls()
@@ -536,34 +677,20 @@ bool ImageTraceDialog::save_stls()
 
 void ImageTraceDialog::on_export_only(wxCommandEvent&)
 {
-    if (m_grid->IsCellEditControlEnabled()) {
-        m_grid->DisableCellEditControl();
-    }
-    m_grid->SaveEditControlValue();
-
     if (m_layers.empty() || m_grid->GetNumberRows() == 0) {
         wxMessageBox(_L("No layers detected. Please trace an image first."),
                      _L("Validation Error"), wxOK | wxICON_WARNING, this);
         return;
     }
 
-    // Sync active layers and heights from grid
+    sync_layers_from_grid();
+
+    // Filter to enabled/active layers only
     std::vector<ColorTraceLayer> active_layers;
     for (int i = 0; i < static_cast<int>(m_layers.size()) && i < m_grid->GetNumberRows(); ++i) {
-        wxString active_val = m_grid->GetCellValue(i, 4);
+        wxString active_val = m_grid->GetCellValue(i, 8);
         bool is_active = (active_val == "1" || active_val.Lower() == "true");
-        if (!is_active) continue;
-
-        double h = 2.0;
-        m_grid->GetCellValue(i, 2).ToDouble(&h);
-        if (h <= 0.0) h = 0.2;
-
-        if (std::abs(m_layers[i].height_mm - h) > 0.001) {
-            m_layers[i].height_mm = h;
-            ColorImageTracer::extrude_layer(m_layers[i]);
-        }
-
-        if (!m_layers[i].mesh.empty()) {
+        if (is_active && !m_layers[i].mesh.empty()) {
             active_layers.push_back(m_layers[i]);
         }
     }
@@ -589,43 +716,20 @@ void ImageTraceDialog::on_export_only(wxCommandEvent&)
 
 void ImageTraceDialog::on_ok(wxCommandEvent&)
 {
-    if (m_grid->IsCellEditControlEnabled()) {
-        m_grid->DisableCellEditControl();
-    }
-    m_grid->SaveEditControlValue();
-
     if (m_layers.empty() || m_grid->GetNumberRows() == 0) {
         wxMessageBox(_L("No layers detected. Please trace an image first."),
                      _L("Validation Error"), wxOK | wxICON_WARNING, this);
         return;
     }
 
+    sync_layers_from_grid();
+
+    // Filter to enabled/active layers only
     std::vector<ColorTraceLayer> active_layers;
     for (int i = 0; i < static_cast<int>(m_layers.size()) && i < m_grid->GetNumberRows(); ++i) {
-        wxString active_val = m_grid->GetCellValue(i, 4);
+        wxString active_val = m_grid->GetCellValue(i, 8);
         bool is_active = (active_val == "1" || active_val.Lower() == "true");
-        if (!is_active) {
-            continue;
-        }
-
-        long ext_id = 1;
-        m_grid->GetCellValue(i, 1).ToLong(&ext_id);
-        m_layers[i].extruder_id = std::clamp(static_cast<int>(ext_id), 1, 16);
-
-        double h = 2.0;
-        m_grid->GetCellValue(i, 2).ToDouble(&h);
-        if (h <= 0.0) h = 0.2;
-
-        wxString neg_val = m_grid->GetCellValue(i, 3);
-        m_layers[i].is_negative = (neg_val == "1" || neg_val.Lower() == "true");
-
-        // Re-extrude if height changed
-        if (std::abs(m_layers[i].height_mm - h) > 0.001) {
-            m_layers[i].height_mm = h;
-            ColorImageTracer::extrude_layer(m_layers[i]);
-        }
-
-        if (!m_layers[i].mesh.empty()) {
+        if (is_active && !m_layers[i].mesh.empty()) {
             active_layers.push_back(m_layers[i]);
         }
     }

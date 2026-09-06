@@ -9,13 +9,32 @@
 
 namespace Slic3r {
 
+enum class CornerStyle {
+    Sharp = 0,     // ClipperLib::jtMiter
+    Round = 1,     // ClipperLib::jtRound
+    Beveled = 2    // ClipperLib::jtSquare
+};
+
+enum class FaceProfile {
+    Flat = 0,
+    Chamfer = 1,
+    Fillet = 2,
+    Peaked = 3,
+    Bubbled = 4
+};
+
 struct ColorTraceLayer {
     unsigned char r{0}, g{0}, b{0};
     double height_mm{2.0};
     int extruder_id{1};
     bool is_negative{false};
-    ExPolygons expolygons;
-    indexed_triangle_set mesh;
+    double offset_mm{0.0};                      // XY tolerance offset (clearance gap < 0, perimeter choke > 0)
+    CornerStyle corner_style{CornerStyle::Sharp};
+    FaceProfile face_profile{FaceProfile::Flat};
+    double face_height_mm{0.8};                 // Height/depth of chamfer, fillet, peak, or dome
+
+    ExPolygons expolygons;                      // Base 2D vectorized contours
+    indexed_triangle_set mesh;                  // Extruded 3D watertight manifold mesh
 };
 
 class ColorImageTracer {
