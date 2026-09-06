@@ -18,6 +18,7 @@ bool ColorImageTracer::process_image(
     int k_clusters,
     double target_width_mm,
     int min_area_px,
+    double smooth_tolerance_px,
     std::vector<ColorTraceLayer>& out_layers,
     std::vector<unsigned char>* out_preview_rgb,
     int* out_preview_width,
@@ -25,26 +26,84 @@ bool ColorImageTracer::process_image(
 {
     out_layers.clear();
 
-    // 1. Load the image
-    cv::Mat img = cv::imread(filepath, cv::IMREAD_COLOR);
+    // 1. Load the image with unchanged channels to preserve alpha transparency
+    cv::Mat img = cv::imread(filepath, cv::IMREAD_UNCHANGED);
     if (img.empty()) {
         return false;
     }
 
-    // 2. Eliminate pixel noise while preserving vector edges
-    cv::Mat filtered;
-    cv::bilateralFilter(img, filtered, 9, 75, 75);
+    // 2. Cap processing dimensions to 1280px for instantaneous clustering and responsiveness
+    const int MAX_DIM = 1280;
+    if (img.cols > MAX_DIM || img.rows > MAX_DIM) {
+        double scale_img = static_cast<double>(MAX_DIM) / std::max(img.cols, img.rows);
+        int new_w = std::max(1, static_cast<int>(std::round(img.cols * scale_img)));
+        int new_h = std::max(1, static_cast<int>(std::round(img.rows * scale_img)));
+        cv::resize(img, img, cv::Size(new_w, new_h), 0, 0, cv::INTER_AREA);
+    }
 
-    int num_pixels = filtered.rows * filtered.cols;
-    if (num_pixels == 0 || target_width_mm <= 0.0) {
+    // 3. Separate BGR color channels and optional Alpha transparency channel
+    bool has_alpha = (img.channels() == 4);
+    cv::Mat bgr;
+    cv::Mat alpha;
+    if (has_alpha) {
+        cv::Mat channels[4];
+        cv::split(img, channels);
+        alpha = channels[3];
+        cv::merge(channels, 3, bgr);
+    } else if (img.channels() == 3) {
+        bgr = img;
+    } else if (img.channels() == 1) {
+        cv::cvtColor(img, bgr, cv::COLOR_GRAY2BGR);
+    } else {
         return false;
     }
 
-    k_clusters = std::clamp(k_clusters, 1, std::min(16, num_pixels));
+    // 4. Eliminate pixel noise while preserving sharp feature boundaries
+    cv::Mat filtered;
+    cv::bilateralFilter(bgr, filtered, 9, 75, 75);
 
-    // 3. Quantize colors via cv::kmeans on float32 reshaped data using cv::KMEANS_PP_CENTERS
-    cv::Mat data = filtered.reshape(1, num_pixels);
-    data.convertTo(data, CV_32F);
+    int total_pixels = filtered.rows * filtered.cols;
+    if (total_pixels == 0 || target_width_mm <= 0.0) {
+        return false;
+    }
+
+    // 5. Gather only opaque pixels for K-means clustering (ignoring transparent voids)
+    std::vector<int> opaque_indices;
+    if (has_alpha) {
+        opaque_indices.reserve(total_pixels);
+        for (int r = 0; r < filtered.rows; ++r) {
+            const uchar* a_row = alpha.ptr<uchar>(r);
+            for (int c = 0; c < filtered.cols; ++c) {
+                if (a_row[c] >= 128) {
+                    opaque_indices.push_back(r * filtered.cols + c);
+                }
+            }
+        }
+    }
+
+    int num_train = has_alpha ? static_cast<int>(opaque_indices.size()) : total_pixels;
+    if (num_train == 0) {
+        return false;
+    }
+
+    k_clusters = std::clamp(k_clusters, 1, std::min(16, num_train));
+
+    // Construct float32 matrix for k-means
+    cv::Mat data(num_train, 3, CV_32F);
+    if (has_alpha) {
+        for (int i = 0; i < num_train; ++i) {
+            int idx = opaque_indices[i];
+            int r = idx / filtered.cols;
+            int c = idx % filtered.cols;
+            const cv::Vec3b& color = filtered.at<cv::Vec3b>(r, c);
+            data.at<float>(i, 0) = static_cast<float>(color[0]);
+            data.at<float>(i, 1) = static_cast<float>(color[1]);
+            data.at<float>(i, 2) = static_cast<float>(color[2]);
+        }
+    } else {
+        cv::Mat reshaped = filtered.reshape(1, total_pixels);
+        reshaped.convertTo(data, CV_32F);
+    }
 
     cv::Mat labels;
     cv::Mat centers;
@@ -52,9 +111,21 @@ bool ColorImageTracer::process_image(
                cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 20, 0.2),
                3, cv::KMEANS_PP_CENTERS, centers);
 
-    cv::Mat label_mat = labels.reshape(1, filtered.rows);
+    // Build discrete 2D label map (CV_8U), where 255 denotes transparent/void
+    cv::Mat label_mat(filtered.rows, filtered.cols, CV_8U, cv::Scalar(255));
+    if (has_alpha) {
+        for (int i = 0; i < num_train; ++i) {
+            int idx = opaque_indices[i];
+            int r = idx / filtered.cols;
+            int c = idx % filtered.cols;
+            label_mat.at<uchar>(r, c) = static_cast<uchar>(labels.at<int>(i));
+        }
+    } else {
+        cv::Mat reshaped_labels = labels.reshape(1, filtered.rows);
+        reshaped_labels.convertTo(label_mat, CV_8U);
+    }
 
-    // Optional: generate quantized RGB preview buffer
+    // 6. Optional: generate quantized RGB preview buffer with checkerboard transparency
     if (out_preview_rgb != nullptr && out_preview_width != nullptr && out_preview_height != nullptr) {
         *out_preview_width = filtered.cols;
         *out_preview_height = filtered.rows;
@@ -63,26 +134,33 @@ bool ColorImageTracer::process_image(
 
         for (int r = 0; r < filtered.rows; ++r) {
             for (int c = 0; c < filtered.cols; ++c) {
-                int cluster_idx = label_mat.at<int>(r, c);
-                float b = centers.at<float>(cluster_idx, 0);
-                float g = centers.at<float>(cluster_idx, 1);
-                float red = centers.at<float>(cluster_idx, 2);
-
                 int px_idx = (r * filtered.cols + c) * 3;
-                dst[px_idx + 0] = static_cast<unsigned char>(std::clamp(red, 0.0f, 255.0f));
-                dst[px_idx + 1] = static_cast<unsigned char>(std::clamp(g, 0.0f, 255.0f));
-                dst[px_idx + 2] = static_cast<unsigned char>(std::clamp(b, 0.0f, 255.0f));
+                uchar lbl = label_mat.at<uchar>(r, c);
+                if (lbl == 255) {
+                    bool check = ((r / 10) + (c / 10)) % 2 == 0;
+                    unsigned char val = check ? 220 : 255;
+                    dst[px_idx + 0] = val;
+                    dst[px_idx + 1] = val;
+                    dst[px_idx + 2] = val;
+                } else {
+                    float b = centers.at<float>(lbl, 0);
+                    float g = centers.at<float>(lbl, 1);
+                    float red = centers.at<float>(lbl, 2);
+                    dst[px_idx + 0] = static_cast<unsigned char>(std::clamp(red, 0.0f, 255.0f));
+                    dst[px_idx + 1] = static_cast<unsigned char>(std::clamp(g, 0.0f, 255.0f));
+                    dst[px_idx + 2] = static_cast<unsigned char>(std::clamp(b, 0.0f, 255.0f));
+                }
             }
         }
     }
 
-    // 4. Calculate scale factor to convert pixel dimensions to internal nanometer Slic3r coordinate units
+    // 7. Calculate scale factor from pixels to Slic3r internal nanometer coordinates
     const double mm_per_px = target_width_mm / static_cast<double>(filtered.cols);
     const double scale = scale_(mm_per_px);
 
     out_layers.reserve(k_clusters);
 
-    // 5. For each cluster index k in [0, K-1]
+    // 8. Vectorize each detected color cluster into clean topological polygons
     for (int k = 0; k < k_clusters; ++k) {
         ColorTraceLayer layer;
         float b = centers.at<float>(k, 0);
@@ -95,76 +173,84 @@ bool ColorImageTracer::process_image(
         layer.height_mm = 2.0;
         layer.is_negative = false;
 
-        // Generate binary mask
         cv::Mat mask = (label_mat == k);
+        if (cv::countNonZero(mask) == 0) {
+            continue;
+        }
 
-        // Apply morphological open/close using a 3x3 rectangle kernel
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
-        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
+        // Discrete 3x3 median filter suppresses 1-pixel anti-aliasing edge noise while preserving fine lines
+        cv::medianBlur(mask, mask, 3);
+        if (cv::countNonZero(mask) == 0) {
+            continue;
+        }
 
-        // Run cv::findContours with RETR_CCOMP and CHAIN_APPROX_TC89_KCOS
+        // Full topological tree extraction to correctly preserve nested islands & holes
         std::vector<std::vector<cv::Point>> contours;
         std::vector<cv::Vec4i> hierarchy;
-        cv::findContours(mask, contours, hierarchy, cv::RETR_CCOMP, cv::CHAIN_APPROX_TC89_KCOS);
+        cv::findContours(mask, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
 
         if (contours.empty() || hierarchy.empty()) {
             continue;
         }
 
-        ExPolygons layer_expolygons;
+        Polygons layer_polygons;
+        layer_polygons.reserve(contours.size());
 
-        for (int i = 0; i < static_cast<int>(contours.size()); ++i) {
-            // Outer contours have hierarchy[i][3] == -1
-            if (hierarchy[i][3] != -1) {
-                continue;
-            }
-
+        for (size_t i = 0; i < contours.size(); ++i) {
             double area = std::abs(cv::contourArea(contours[i]));
             if (area < min_area_px || contours[i].size() < 3) {
                 continue;
             }
 
-            ExPolygon expoly;
-            expoly.contour.points.reserve(contours[i].size());
-            for (const auto& pt : contours[i]) {
+            std::vector<cv::Point> approx;
+            if (smooth_tolerance_px > 0.0) {
+                cv::approxPolyDP(contours[i], approx, smooth_tolerance_px, true);
+            } else {
+                approx = contours[i];
+            }
+            if (approx.size() < 3) {
+                continue;
+            }
+
+            // Determine contour nesting depth: even = solid outer island, odd = hole
+            int depth = 0;
+            int p = hierarchy[i][3];
+            while (p != -1) {
+                depth++;
+                p = hierarchy[p][3];
+            }
+            bool is_hole = (depth % 2 == 1);
+
+            Polygon poly;
+            poly.points.reserve(approx.size());
+            for (const auto& pt : approx) {
                 coord_t x = static_cast<coord_t>(std::round(pt.x * scale));
                 coord_t y = static_cast<coord_t>(std::round((filtered.rows - pt.y) * scale));
-                expoly.contour.points.emplace_back(x, y);
+                poly.points.emplace_back(x, y);
             }
 
-            if (expoly.contour.is_clockwise()) {
-                expoly.contour.reverse();
-            }
-
-            // Gather child contours (hierarchy[i][2]) as holes
-            int child_idx = hierarchy[i][2];
-            while (child_idx != -1) {
-                double hole_area = std::abs(cv::contourArea(contours[child_idx]));
-                if (hole_area >= min_area_px && contours[child_idx].size() >= 3) {
-                    Polygon hole;
-                    hole.points.reserve(contours[child_idx].size());
-                    for (const auto& pt : contours[child_idx]) {
-                        coord_t x = static_cast<coord_t>(std::round(pt.x * scale));
-                        coord_t y = static_cast<coord_t>(std::round((filtered.rows - pt.y) * scale));
-                        hole.points.emplace_back(x, y);
-                    }
-                    if (!hole.is_clockwise()) {
-                        hole.reverse();
-                    }
-                    expoly.holes.push_back(std::move(hole));
+            // Slic3r & Clipper NonZero convention in Cartesian space:
+            // Outer contours must be CCW, holes must be CW
+            if (!is_hole) {
+                if (poly.is_clockwise()) {
+                    poly.reverse();
                 }
-                child_idx = hierarchy[child_idx][0]; // next sibling hole
+            } else {
+                if (!poly.is_clockwise()) {
+                    poly.reverse();
+                }
             }
 
-            layer_expolygons.push_back(std::move(expoly));
+            layer_polygons.push_back(std::move(poly));
         }
 
-        // Clean and repair polygons using Clipper union_ex
-        layer.expolygons = union_ex(layer_expolygons);
-        if (!layer.expolygons.empty()) {
-            extrude_layer(layer);
-            out_layers.push_back(std::move(layer));
+        if (!layer_polygons.empty()) {
+            // Clipper strictly-simple union resolves all nesting and eliminates pinched/bowtie vertices
+            layer.expolygons = simplify_polygons_ex(layer_polygons);
+            if (!layer.expolygons.empty()) {
+                extrude_layer(layer);
+                out_layers.push_back(std::move(layer));
+            }
         }
     }
 
@@ -178,84 +264,48 @@ void ColorImageTracer::extrude_layer(ColorTraceLayer& layer)
         return;
     }
 
-    const float z_bottom = 0.0f;
-    const float z_top = static_cast<float>(layer.height_mm);
+    const double z_bottom = 0.0;
+    const double z_top = layer.height_mm;
+
+    // 1. Bottom and top caps using Slic3r's native triangulate_expolygons_3d
+    its_merge(layer.mesh, triangulate_expolygons_3d(layer.expolygons, z_bottom, NORMALS_DOWN));
+    its_merge(layer.mesh, triangulate_expolygons_3d(layer.expolygons, z_top, NORMALS_UP));
+
+    // 2. Vertical side walls connecting perimeter loops with bit-exact float vertices
+    auto create_wall_strip = [](const Polygon& poly, double lower_z, double upper_z) -> indexed_triangle_set {
+        indexed_triangle_set ret;
+        size_t offs = poly.points.size();
+        if (offs < 3) {
+            return ret;
+        }
+
+        ret.vertices.reserve(2 * offs);
+        for (const Point& p : poly.points) {
+            ret.vertices.emplace_back(to_3d(unscaled(p).cast<float>().eval(), static_cast<float>(lower_z)));
+        }
+        for (const Point& p : poly.points) {
+            ret.vertices.emplace_back(to_3d(unscaled(p).cast<float>().eval(), static_cast<float>(upper_z)));
+        }
+
+        ret.indices.reserve(2 * offs);
+        for (size_t i = 1; i < offs; ++i) {
+            ret.indices.emplace_back(static_cast<int>(i - 1), static_cast<int>(i), static_cast<int>(i + offs - 1));
+            ret.indices.emplace_back(static_cast<int>(i), static_cast<int>(i + offs), static_cast<int>(i + offs - 1));
+        }
+        ret.indices.emplace_back(static_cast<int>(offs - 1), 0, static_cast<int>(2 * offs - 1));
+        ret.indices.emplace_back(0, static_cast<int>(offs), static_cast<int>(2 * offs - 1));
+
+        return ret;
+    };
 
     for (const ExPolygon& expoly : layer.expolygons) {
-        // 1. Tessellate 2D polygons using Slic3r::triangulate_expolygon_2d
-        std::vector<Vec2d> triangles_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
-        if (triangles_2d.size() < 3) {
-            continue;
-        }
-
-        // Bottom cap vertices at Z = 0 with reversed winding (normals oriented downward)
-        for (size_t t = 0; t + 2 < triangles_2d.size(); t += 3) {
-            Vec3f v0(static_cast<float>(triangles_2d[t].x()),     static_cast<float>(triangles_2d[t].y()),     z_bottom);
-            Vec3f v1(static_cast<float>(triangles_2d[t + 2].x()), static_cast<float>(triangles_2d[t + 2].y()), z_bottom);
-            Vec3f v2(static_cast<float>(triangles_2d[t + 1].x()), static_cast<float>(triangles_2d[t + 1].y()), z_bottom);
-
-            int base_idx = static_cast<int>(layer.mesh.vertices.size());
-            layer.mesh.vertices.push_back(v0);
-            layer.mesh.vertices.push_back(v1);
-            layer.mesh.vertices.push_back(v2);
-            layer.mesh.indices.emplace_back(base_idx, base_idx + 1, base_idx + 2);
-        }
-
-        // Top cap vertices at Z = layer.height_mm with CCW winding (normals oriented upward)
-        for (size_t t = 0; t + 2 < triangles_2d.size(); t += 3) {
-            Vec3f v0(static_cast<float>(triangles_2d[t].x()),     static_cast<float>(triangles_2d[t].y()),     z_top);
-            Vec3f v1(static_cast<float>(triangles_2d[t + 1].x()), static_cast<float>(triangles_2d[t + 1].y()), z_top);
-            Vec3f v2(static_cast<float>(triangles_2d[t + 2].x()), static_cast<float>(triangles_2d[t + 2].y()), z_top);
-
-            int base_idx = static_cast<int>(layer.mesh.vertices.size());
-            layer.mesh.vertices.push_back(v0);
-            layer.mesh.vertices.push_back(v1);
-            layer.mesh.vertices.push_back(v2);
-            layer.mesh.indices.emplace_back(base_idx, base_idx + 1, base_idx + 2);
-        }
-
-        // 2. Side walls connecting perimeter loop vertices from Z = 0 to Z = height_mm
-        auto extrude_loop = [&](const Polygon& loop) {
-            size_t n = loop.points.size();
-            if (n < 3) return;
-
-            int base_idx = static_cast<int>(layer.mesh.vertices.size());
-            layer.mesh.vertices.reserve(layer.mesh.vertices.size() + 2 * n);
-            layer.mesh.indices.reserve(layer.mesh.indices.size() + 2 * n);
-
-            // Add bottom ring [0..n-1]
-            for (size_t i = 0; i < n; ++i) {
-                Vec2d pt = unscaled(loop.points[i]);
-                layer.mesh.vertices.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()), z_bottom);
-            }
-            // Add top ring [n..2n-1]
-            for (size_t i = 0; i < n; ++i) {
-                Vec2d pt = unscaled(loop.points[i]);
-                layer.mesh.vertices.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()), z_top);
-            }
-
-            // Generate side-wall quads (split into two triangles)
-            // Outer contour is CCW -> normals point outward
-            // Hole contour is CW -> normals point into the hole void
-            for (size_t i = 0; i < n; ++i) {
-                size_t next = (i + 1) % n;
-                int b_i = base_idx + static_cast<int>(i);
-                int b_next = base_idx + static_cast<int>(next);
-                int t_i = base_idx + static_cast<int>(n + i);
-                int t_next = base_idx + static_cast<int>(n + next);
-
-                layer.mesh.indices.emplace_back(b_i, b_next, t_next);
-                layer.mesh.indices.emplace_back(b_i, t_next, t_i);
-            }
-        };
-
-        extrude_loop(expoly.contour);
+        its_merge(layer.mesh, create_wall_strip(expoly.contour, z_bottom, z_top));
         for (const Polygon& hole : expoly.holes) {
-            extrude_loop(hole);
+            its_merge(layer.mesh, create_wall_strip(hole, z_bottom, z_top));
         }
     }
 
-    // Merge vertices and remove degenerate faces to ensure watertight manifold mesh
+    // 3. Weld matching float vertices and remove degenerate elements to ensure 100% watertight manifold mesh
     its_merge_vertices(layer.mesh);
     its_remove_degenerate_faces(layer.mesh);
     its_compactify_vertices(layer.mesh);

@@ -18,7 +18,7 @@ namespace Slic3r {
 namespace GUI {
 
 // ----------------------------------------------------------------------------
-// ImagePreviewCanvas Implementation
+// ImagePreviewCanvas Implementation (Interactive Zoom, Pan & Checkerboard)
 // ----------------------------------------------------------------------------
 
 ImagePreviewCanvas::ImagePreviewCanvas(wxWindow* parent)
@@ -28,11 +28,18 @@ ImagePreviewCanvas::ImagePreviewCanvas(wxWindow* parent)
     Bind(wxEVT_PAINT, &ImagePreviewCanvas::on_paint, this);
     Bind(wxEVT_SIZE, &ImagePreviewCanvas::on_size, this);
     Bind(wxEVT_ERASE_BACKGROUND, [](wxEraseEvent&) {}); // Prevent flicker
+    Bind(wxEVT_MOUSEWHEEL, &ImagePreviewCanvas::on_mouse_wheel, this);
+    Bind(wxEVT_LEFT_DOWN, &ImagePreviewCanvas::on_mouse_left_down, this);
+    Bind(wxEVT_MOTION, &ImagePreviewCanvas::on_mouse_motion, this);
+    Bind(wxEVT_LEFT_UP, &ImagePreviewCanvas::on_mouse_left_up, this);
+    Bind(wxEVT_LEFT_DCLICK, &ImagePreviewCanvas::on_mouse_dclick, this);
 }
 
 void ImagePreviewCanvas::set_original_image(const wxImage& img)
 {
     m_original_img = img;
+    m_zoom = 1.0;
+    m_pan_offset = wxPoint(0, 0);
     Refresh();
 }
 
@@ -52,6 +59,9 @@ void ImagePreviewCanvas::clear()
 {
     m_original_img = wxImage();
     m_quantized_img = wxImage();
+    m_zoom = 1.0;
+    m_pan_offset = wxPoint(0, 0);
+    m_is_dragging = false;
     Refresh();
 }
 
@@ -59,6 +69,49 @@ void ImagePreviewCanvas::on_size(wxSizeEvent& evt)
 {
     Refresh();
     evt.Skip();
+}
+
+void ImagePreviewCanvas::on_mouse_wheel(wxMouseEvent& evt)
+{
+    double factor = (evt.GetWheelRotation() > 0) ? 1.15 : (1.0 / 1.15);
+    m_zoom = std::clamp(m_zoom * factor, 0.2, 25.0);
+    Refresh();
+}
+
+void ImagePreviewCanvas::on_mouse_left_down(wxMouseEvent& evt)
+{
+    m_is_dragging = true;
+    m_drag_start = evt.GetPosition();
+    if (!HasCapture()) {
+        CaptureMouse();
+    }
+}
+
+void ImagePreviewCanvas::on_mouse_motion(wxMouseEvent& evt)
+{
+    if (m_is_dragging && evt.Dragging() && evt.LeftIsDown()) {
+        wxPoint delta = evt.GetPosition() - m_drag_start;
+        m_pan_offset += delta;
+        m_drag_start = evt.GetPosition();
+        Refresh();
+    }
+}
+
+void ImagePreviewCanvas::on_mouse_left_up(wxMouseEvent&)
+{
+    if (m_is_dragging) {
+        m_is_dragging = false;
+        if (HasCapture()) {
+            ReleaseMouse();
+        }
+    }
+}
+
+void ImagePreviewCanvas::on_mouse_dclick(wxMouseEvent&)
+{
+    m_zoom = 1.0;
+    m_pan_offset = wxPoint(0, 0);
+    Refresh();
 }
 
 void ImagePreviewCanvas::on_paint(wxPaintEvent&)
@@ -87,20 +140,33 @@ void ImagePreviewCanvas::on_paint(wxPaintEvent&)
         int avail_h = sz.y - 24;
 
         if (avail_w > 0 && avail_h > 0) {
-            double scale = std::min(static_cast<double>(avail_w) / iw, static_cast<double>(avail_h) / ih);
-            int tw = std::max(1, static_cast<int>(iw * scale));
-            int th = std::max(1, static_cast<int>(ih * scale));
-            int ox = (sz.x - tw) / 2;
-            int oy = (sz.y - th) / 2;
+            double base_scale = std::min(static_cast<double>(avail_w) / iw, static_cast<double>(avail_h) / ih);
+            double final_scale = base_scale * m_zoom;
 
-            // Border outline
-            dc.SetPen(wxPen(wxColour(60, 64, 72), 1));
+            int tw = std::max(1, static_cast<int>(iw * final_scale));
+            int th = std::max(1, static_cast<int>(ih * final_scale));
+
+            int ox = (sz.x - tw) / 2 + m_pan_offset.x;
+            int oy = (sz.y - th) / 2 + m_pan_offset.y;
+
+            // Border outline around image
+            dc.SetPen(wxPen(wxColour(65, 70, 80), 1));
             dc.SetBrush(*wxTRANSPARENT_BRUSH);
             dc.DrawRectangle(ox - 1, oy - 1, tw + 2, th + 2);
 
             wxImage scaled = active_img->Scale(tw, th, wxIMAGE_QUALITY_HIGH);
             wxBitmap bmp(scaled);
             dc.DrawBitmap(bmp, ox, oy, false);
+
+            // Controls helper tooltip at bottom right
+            dc.SetTextForeground(wxColour(110, 115, 125));
+            wxFont hint_font = dc.GetFont();
+            hint_font.SetPointSize(8);
+            dc.SetFont(hint_font);
+            wxString hint = _L("Wheel: Zoom  |  Drag: Pan  |  Double-Click: Reset View");
+            wxCoord hw = 0, hh = 0;
+            dc.GetTextExtent(hint, &hw, &hh);
+            dc.DrawText(hint, sz.x - hw - 10, sz.y - hh - 6);
         }
     } else {
         // Placeholder instructions
@@ -125,13 +191,14 @@ static wxString get_default_stl_dir()
     return desktop_dir + "\\Orca_Traced_STLs";
 }
 
-ImageTraceDialog::ImageTraceDialog(wxWindow* parent)
+ImageTraceDialog::ImageTraceDialog(wxWindow* parent, const std::vector<wxColour>& loaded_filaments)
     : wxDialog(parent, wxID_ANY, _L("Native Image Vectorization & 3D Extrusion"),
-               wxDefaultPosition, wxSize(1060, 720),
+               wxDefaultPosition, wxSize(1080, 740),
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+    , m_loaded_filaments(loaded_filaments)
 {
     init_ui();
-    SetMinSize(wxSize(900, 600));
+    SetMinSize(wxSize(920, 620));
 }
 
 void ImageTraceDialog::init_ui()
@@ -148,7 +215,7 @@ void ImageTraceDialog::init_ui()
 
     // 1. Parameter Settings Group
     auto* settings_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Tracing Parameters"));
-    auto* grid_sizer = new wxFlexGridSizer(6, 2, 6, 10);
+    auto* grid_sizer = new wxFlexGridSizer(7, 2, 6, 10);
     grid_sizer->AddGrowableCol(1, 1);
 
     // Input Image File Selector
@@ -177,9 +244,16 @@ void ImageTraceDialog::init_ui()
     m_spin_height = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0.1, 200.0, 2.0, 0.2);
     grid_sizer->Add(m_spin_height, 0, wxEXPAND);
 
+    // Curve Smoothing (px)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Curve Smoothing (px):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_smoothing = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0.0, 5.0, 0.8, 0.1);
+    m_spin_smoothing->SetToolTip(_L("Douglas-Peucker contour simplification tolerance (0.8 recommended; 0 = exact pixel steps)"));
+    grid_sizer->Add(m_spin_smoothing, 0, wxEXPAND);
+
     // Minimum Area Filter (pixels)
     grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Min Area Filter (px):")), 0, wxALIGN_CENTER_VERTICAL);
-    m_spin_min_area = new wxSpinCtrl(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100000, 50);
+    m_spin_min_area = new wxSpinCtrl(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100000, 5);
+    m_spin_min_area->SetToolTip(_L("Minimum pixel area to preserve fine details (default 5 preserves small text & pupils)"));
     grid_sizer->Add(m_spin_min_area, 0, wxEXPAND);
 
     // STL Export Directory
@@ -225,7 +299,7 @@ void ImageTraceDialog::init_ui()
     // ==========================================
     // Right Pane (Dedicated Canvas View Window)
     // ==========================================
-    auto* preview_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Canvas Preview (Separate View Window)"));
+    auto* preview_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Canvas Preview (Interactive View Window)"));
 
     // Preview Mode Header Toolbar
     auto* header_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -316,6 +390,7 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
     double width_mm = m_spin_width->GetValue();
     int min_area_px = m_spin_min_area->GetValue();
     double default_height = m_spin_height->GetValue();
+    double smooth_px = m_spin_smoothing->GetValue();
 
     wxBusyCursor wait;
     std::vector<unsigned char> preview_rgb;
@@ -327,6 +402,7 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
         k_clusters,
         width_mm,
         min_area_px,
+        smooth_px,
         m_layers,
         &preview_rgb,
         &preview_w,
@@ -347,6 +423,26 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
         m_radio_quantized->SetValue(true);
         m_lbl_preview_info->SetLabel(wxString::Format(_L("Quantized (%d layers): %d x %d px"),
             static_cast<int>(m_layers.size()), preview_w, preview_h));
+    }
+
+    // Automatically match detected color layers to nearest loaded extruder filament color
+    if (!m_loaded_filaments.empty()) {
+        for (auto& layer : m_layers) {
+            double min_dist_sq = 1e9;
+            int best_idx = 0;
+            for (size_t f = 0; f < m_loaded_filaments.size(); ++f) {
+                const wxColour& fc = m_loaded_filaments[f];
+                double dr = static_cast<double>(layer.r) - fc.Red();
+                double dg = static_cast<double>(layer.g) - fc.Green();
+                double db = static_cast<double>(layer.b) - fc.Blue();
+                double dist_sq = dr * dr + dg * dg + db * db;
+                if (dist_sq < min_dist_sq) {
+                    min_dist_sq = dist_sq;
+                    best_idx = static_cast<int>(f);
+                }
+            }
+            layer.extruder_id = best_idx + 1;
+        }
     }
 
     // Apply default base height to all layers

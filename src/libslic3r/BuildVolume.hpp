@@ -56,7 +56,6 @@ public:
 
     // Center of the print bed, unscaled.
     Vec2d                       bed_center()        const { return to_2d(m_bboxf.center()); }
-    Vec2d                       bed_center_2d()     const { return bed_center(); }
     // Convex hull of polygon(), scaled.
     const Polygon&              convex_hull()       const { return m_convex_hull; }
     // Smallest enclosing circle of polygon(), scaled.

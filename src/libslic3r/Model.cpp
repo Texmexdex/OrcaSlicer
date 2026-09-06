@@ -1822,16 +1822,6 @@ void ModelObject::center_around_origin(bool include_modifiers)
     this->origin_translation += shift;
 }
 
-void ModelObject::center_around_bed_center(const Vec2d &bed_center)
-{
-    this->center_around_origin();
-    if (this->instances.empty()) {
-        this->add_instance();
-    }
-    this->instances.front()->set_offset(to_3d(bed_center, -this->origin_translation.z()));
-    this->ensure_on_bed();
-}
-
 void ModelObject::ensure_on_bed(bool allow_negative_z)
 {
     double z_offset = 0.0;
@@ -2572,11 +2562,6 @@ int ModelVolume::extruder_id() const
         extruder_id = (opt == nullptr) ? 0 : opt->getInt();
     }
     return extruder_id;
-}
-
-void ModelVolume::set_extruder_id(int id)
-{
-    this->config.set_key_value("extruder", new ConfigOptionInt(id));
 }
 
 bool ModelVolume::is_splittable() const

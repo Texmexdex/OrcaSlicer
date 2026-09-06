@@ -25,6 +25,7 @@ public:
         int k_clusters,
         double target_width_mm,
         int min_area_px,
+        double smooth_tolerance_px,
         std::vector<ColorTraceLayer>& out_layers,
         std::vector<unsigned char>* out_preview_rgb = nullptr,
         int* out_preview_width = nullptr,

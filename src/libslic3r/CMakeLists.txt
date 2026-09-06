@@ -535,7 +535,11 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS} ${OpenC
 set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
-target_link_libraries(libslic3r PUBLIC nlohmann_json opencv_world)
+if (TARGET opencv_world)
+    target_link_libraries(libslic3r PUBLIC nlohmann_json opencv_world)
+else ()
+    target_link_libraries(libslic3r PUBLIC nlohmann_json ${OpenCV_LIBS})
+endif ()
 
 find_package(JPEG REQUIRED)
 

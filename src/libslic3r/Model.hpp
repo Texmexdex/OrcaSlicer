@@ -491,7 +491,6 @@ public:
     Polygon       convex_hull_2d(const Transform3d &trafo_instance) const;
 
     void center_around_origin(bool include_modifiers = true);
-    void center_around_bed_center(const Vec2d &bed_center);
     void ensure_on_bed(bool allow_negative_z = false);
 
     void translate_instances(const Vec3d& vector);
@@ -921,7 +920,6 @@ public:
     // Extract the current extruder ID based on this ModelVolume's config and the parent ModelObject's config.
     // Extruder ID is only valid for FFF. Returns -1 for SLA or if the extruder ID is not applicable (support volumes).
     int                 extruder_id() const;
-    void                set_extruder_id(int id);
 
     bool                is_splittable() const;
 

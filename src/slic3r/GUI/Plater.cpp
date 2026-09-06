@@ -18040,7 +18040,18 @@ void Plater::add_model(bool imperial_units, std::string fname)
 
 void Plater::load_image_trace()
 {
-    ImageTraceDialog dlg(this);
+    std::vector<wxColour> loaded_filaments;
+    if (wxGetApp().preset_bundle) {
+        if (const auto* colors_opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour")) {
+            for (const auto& hex : colors_opt->values) {
+                if (!hex.empty()) {
+                    loaded_filaments.emplace_back(wxString::FromUTF8(hex.c_str()));
+                }
+            }
+        }
+    }
+
+    ImageTraceDialog dlg(this, loaded_filaments);
     if (dlg.ShowModal() == wxID_OK) {
         const auto& stl_paths = dlg.get_exported_stl_paths();
         const auto& layers = dlg.get_layers();
@@ -18060,7 +18071,7 @@ void Plater::load_image_trace()
                     for (size_t v_idx = 0; v_idx < obj->volumes.size(); ++v_idx) {
                         ModelVolume* vol = obj->volumes[v_idx];
                         if (!vol) continue;
-                        vol->set_extruder_id(layers[v_idx].extruder_id);
+                        vol->config.set_key_value("extruder", new ConfigOptionInt(layers[v_idx].extruder_id));
                         vol->set_type(layers[v_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
                     }
                 }
@@ -18072,7 +18083,7 @@ void Plater::load_image_trace()
                         if (l_idx < layers.size() && !obj->volumes.empty()) {
                             ModelVolume* vol = obj->volumes[0];
                             if (vol) {
-                                vol->set_extruder_id(layers[l_idx].extruder_id);
+                                vol->config.set_key_value("extruder", new ConfigOptionInt(layers[l_idx].extruder_id));
                                 vol->set_type(layers[l_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
                             }
                         }
