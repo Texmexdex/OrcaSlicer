@@ -30,6 +30,7 @@ add_executable(${_TEST_NAME}_tests
     test_indexed_triangle_set.cpp
 	TestMD5.cpp
     ../libnest2d/printer_parts.cpp
+	test_color_image_tracer.cpp
 	)
 
 if (TARGET OpenVDB::openvdb)

@@ -186,16 +186,21 @@ static wxString get_default_stl_dir()
 {
     wxString desktop_dir = wxStandardPaths::Get().GetUserDir(wxStandardPaths::Dir_Desktop);
     if (desktop_dir.IsEmpty() || !wxDirExists(desktop_dir)) {
-        desktop_dir = wxGetHomeDir() + "\\Desktop";
+        wxFileName fn(wxGetHomeDir(), "");
+        fn.AppendDir("Desktop");
+        desktop_dir = fn.GetPath();
     }
-    return desktop_dir + "\\Orca_Traced_STLs";
+    wxFileName stl_fn(desktop_dir, "");
+    stl_fn.AppendDir("Orca_Traced_STLs");
+    return stl_fn.GetPath();
 }
 
-ImageTraceDialog::ImageTraceDialog(wxWindow* parent, const std::vector<wxColour>& loaded_filaments)
+ImageTraceDialog::ImageTraceDialog(wxWindow* parent, const std::vector<wxColour>& loaded_filaments, int max_extruders)
     : wxDialog(parent, wxID_ANY, _L("Native Image Vectorization & 3D Extrusion"),
                wxDefaultPosition, wxSize(1220, 780),
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
     , m_loaded_filaments(loaded_filaments)
+    , m_max_extruders(std::clamp(max_extruders, 1, 16))
 {
     init_ui();
     SetMinSize(wxSize(1020, 660));
@@ -487,7 +492,11 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
                     best_idx = static_cast<int>(f);
                 }
             }
-            layer.extruder_id = best_idx + 1;
+            layer.extruder_id = std::clamp(best_idx + 1, 1, m_max_extruders);
+        }
+    } else {
+        for (size_t i = 0; i < m_layers.size(); ++i) {
+            m_layers[i].extruder_id = static_cast<int>((i % m_max_extruders) + 1);
         }
     }
 
@@ -578,6 +587,7 @@ void ImageTraceDialog::on_trace(wxCommandEvent&)
 
 void ImageTraceDialog::sync_layers_from_grid()
 {
+    wxBusyCursor wait;
     if (m_grid->IsCellEditControlEnabled()) {
         m_grid->DisableCellEditControl();
     }
@@ -586,7 +596,7 @@ void ImageTraceDialog::sync_layers_from_grid()
     for (int i = 0; i < static_cast<int>(m_layers.size()) && i < m_grid->GetNumberRows(); ++i) {
         long ext_id = 1;
         m_grid->GetCellValue(i, 1).ToLong(&ext_id);
-        m_layers[i].extruder_id = std::clamp(static_cast<int>(ext_id), 1, 16);
+        m_layers[i].extruder_id = std::clamp(static_cast<int>(ext_id), 1, m_max_extruders);
 
         double h = 2.0;
         m_grid->GetCellValue(i, 2).ToDouble(&h);
@@ -650,7 +660,9 @@ bool ImageTraceDialog::save_stls()
         img_name = "Traced_Image";
     }
 
-    wxString img_folder = base_dir + "\\" + img_name;
+    wxFileName img_folder_fn(base_dir, "");
+    img_folder_fn.AppendDir(img_name);
+    wxString img_folder = img_folder_fn.GetPath();
     if (!wxDirExists(img_folder)) {
         wxFileName::Mkdir(img_folder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
     }
@@ -664,7 +676,8 @@ bool ImageTraceDialog::save_stls()
             img_name,
             static_cast<int>(i + 1),
             m_layers[i].r, m_layers[i].g, m_layers[i].b);
-        wxString fullpath = img_folder + "\\" + filename;
+        wxFileName file_fn(img_folder, filename);
+        wxString fullpath = file_fn.GetFullPath();
 
         std::string path_u8 = std::string(fullpath.ToUTF8());
         if (its_write_stl_binary(path_u8.c_str(), "", m_layers[i].mesh)) {

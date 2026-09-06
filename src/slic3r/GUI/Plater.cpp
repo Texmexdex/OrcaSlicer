@@ -18041,6 +18041,7 @@ void Plater::add_model(bool imperial_units, std::string fname)
 void Plater::load_image_trace()
 {
     std::vector<wxColour> loaded_filaments;
+    int max_extruders = 16;
     if (wxGetApp().preset_bundle) {
         if (const auto* colors_opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour")) {
             for (const auto& hex : colors_opt->values) {
@@ -18050,47 +18051,57 @@ void Plater::load_image_trace()
             }
         }
     }
+    if (!loaded_filaments.empty()) {
+        max_extruders = std::clamp(static_cast<int>(loaded_filaments.size()), 1, 16);
+    }
 
-    ImageTraceDialog dlg(this, loaded_filaments);
+    ImageTraceDialog dlg(this, loaded_filaments, max_extruders);
     if (dlg.ShowModal() == wxID_OK) {
         const auto& stl_paths = dlg.get_exported_stl_paths();
         const auto& layers = dlg.get_layers();
         if (stl_paths.empty() || layers.empty()) return;
 
         // Import exported STL files using native OrcaSlicer import pipeline
-        std::vector<size_t> loaded_idxs = this->load_files(stl_paths, LoadStrategy::LoadModel, true);
+        std::vector<size_t> loaded_idxs = this->load_files(stl_paths, LoadStrategy::LoadModel, false);
 
         if (!loaded_idxs.empty()) {
-            for (size_t obj_idx : loaded_idxs) {
-                if (obj_idx >= this->model().objects.size()) continue;
-                ModelObject* obj = this->model().objects[obj_idx];
-                if (!obj) continue;
-
-                // Case 1: All parts loaded as a single multi-part object
-                if (obj->volumes.size() == layers.size()) {
-                    for (size_t v_idx = 0; v_idx < obj->volumes.size(); ++v_idx) {
-                        ModelVolume* vol = obj->volumes[v_idx];
-                        if (!vol) continue;
-                        vol->config.set_key_value("extruder", new ConfigOptionInt(layers[v_idx].extruder_id));
-                        vol->set_type(layers[v_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
+            // Guarantee all parts are unified into a single multi-part ModelObject
+            // so Auto-Arrange ('A') never scatters color segments across the build plate
+            if (loaded_idxs.size() > 1) {
+                size_t base_idx = loaded_idxs[0];
+                if (base_idx < this->model().objects.size()) {
+                    ModelObject* base_obj = this->model().objects[base_idx];
+                    for (size_t i = 1; i < loaded_idxs.size(); ++i) {
+                        size_t other_idx = loaded_idxs[i];
+                        if (other_idx < this->model().objects.size()) {
+                            ModelObject* other_obj = this->model().objects[other_idx];
+                            for (ModelVolume* v : other_obj->volumes) {
+                                base_obj->add_volume(*v);
+                            }
+                        }
+                    }
+                    // Delete the redundant individual objects in reverse order
+                    for (int i = static_cast<int>(loaded_idxs.size()) - 1; i >= 1; --i) {
+                        this->delete_object_from_model(loaded_idxs[i], false);
                     }
                 }
-                // Case 2: Loaded as individual objects per component
-                else if (loaded_idxs.size() == layers.size()) {
-                    auto it = std::find(loaded_idxs.begin(), loaded_idxs.end(), obj_idx);
-                    if (it != loaded_idxs.end()) {
-                        size_t l_idx = std::distance(loaded_idxs.begin(), it);
-                        if (l_idx < layers.size() && !obj->volumes.empty()) {
-                            ModelVolume* vol = obj->volumes[0];
-                            if (vol) {
-                                vol->config.set_key_value("extruder", new ConfigOptionInt(layers[l_idx].extruder_id));
-                                vol->set_type(layers[l_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
-                            }
+                loaded_idxs = { base_idx };
+            }
+
+            if (!loaded_idxs.empty() && loaded_idxs[0] < this->model().objects.size()) {
+                ModelObject* obj = this->model().objects[loaded_idxs[0]];
+                if (obj) {
+                    for (size_t v_idx = 0; v_idx < obj->volumes.size() && v_idx < layers.size(); ++v_idx) {
+                        ModelVolume* vol = obj->volumes[v_idx];
+                        if (vol) {
+                            vol->config.set_key_value("extruder", new ConfigOptionInt(layers[v_idx].extruder_id));
+                            vol->set_type(layers[v_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
                         }
                     }
                 }
             }
 
+            sidebar().obj_list()->update_name_for_items();
             this->take_snapshot(std::string(_("Trace Image to 3D Assembly").ToUTF8()));
             this->update();
         }

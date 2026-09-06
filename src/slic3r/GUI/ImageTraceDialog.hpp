@@ -52,7 +52,7 @@ private:
 
 class ImageTraceDialog : public wxDialog {
 public:
-    explicit ImageTraceDialog(wxWindow* parent, const std::vector<wxColour>& loaded_filaments = {});
+    explicit ImageTraceDialog(wxWindow* parent, const std::vector<wxColour>& loaded_filaments = {}, int max_extruders = 16);
     ~ImageTraceDialog() override = default;
 
     const std::vector<ColorTraceLayer>& get_layers() const { return m_layers; }
@@ -90,6 +90,7 @@ private:
     wxStaticText*       m_lbl_preview_info{nullptr};
 
     std::vector<wxColour>        m_loaded_filaments;
+    int                          m_max_extruders{16};
     std::vector<ColorTraceLayer>  m_layers;
     std::vector<std::string>     m_exported_stl_paths;
 };
