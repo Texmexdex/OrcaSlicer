@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "ImageTraceDialog.hpp"
 #include "MixedFilamentDialog.hpp"
 #include "MixedFilamentBatchDialog.hpp"
 #include "MixedGradientSelector.hpp"
@@ -18034,6 +18035,54 @@ void Plater::add_model(bool imperial_units, std::string fname)
         }
 
         wxGetApp().mainframe->update_title();
+    }
+}
+
+void Plater::load_image_trace()
+{
+    ImageTraceDialog dlg(this);
+    if (dlg.ShowModal() == wxID_OK) {
+        const auto& stl_paths = dlg.get_exported_stl_paths();
+        const auto& layers = dlg.get_layers();
+        if (stl_paths.empty() || layers.empty()) return;
+
+        // Import exported STL files using native OrcaSlicer import pipeline
+        std::vector<size_t> loaded_idxs = this->load_files(stl_paths, LoadStrategy::LoadModel, true);
+
+        if (!loaded_idxs.empty()) {
+            for (size_t obj_idx : loaded_idxs) {
+                if (obj_idx >= this->model().objects.size()) continue;
+                ModelObject* obj = this->model().objects[obj_idx];
+                if (!obj) continue;
+
+                // Case 1: All parts loaded as a single multi-part object
+                if (obj->volumes.size() == layers.size()) {
+                    for (size_t v_idx = 0; v_idx < obj->volumes.size(); ++v_idx) {
+                        ModelVolume* vol = obj->volumes[v_idx];
+                        if (!vol) continue;
+                        vol->set_extruder_id(layers[v_idx].extruder_id);
+                        vol->set_type(layers[v_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
+                    }
+                }
+                // Case 2: Loaded as individual objects per component
+                else if (loaded_idxs.size() == layers.size()) {
+                    auto it = std::find(loaded_idxs.begin(), loaded_idxs.end(), obj_idx);
+                    if (it != loaded_idxs.end()) {
+                        size_t l_idx = std::distance(loaded_idxs.begin(), it);
+                        if (l_idx < layers.size() && !obj->volumes.empty()) {
+                            ModelVolume* vol = obj->volumes[0];
+                            if (vol) {
+                                vol->set_extruder_id(layers[l_idx].extruder_id);
+                                vol->set_type(layers[l_idx].is_negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
+                            }
+                        }
+                    }
+                }
+            }
+
+            this->take_snapshot(std::string(_("Trace Image to 3D Assembly").ToUTF8()));
+            this->update();
+        }
     }
 }
 

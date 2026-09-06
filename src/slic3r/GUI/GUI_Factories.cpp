@@ -565,6 +565,8 @@ wxMenu* MenuFactory::append_submenu_add_generic(wxMenu* menu, ModelVolumeType ty
 
     append_menu_item_add_text(sub_menu, type);
     append_menu_item_add_svg(sub_menu, type);
+    append_menu_item(sub_menu, wxID_ANY, _L("From Image Trace..."), "",
+        [](wxCommandEvent&) { if (plater()) plater()->load_image_trace(); }, "menu_add_part", menu);
 
     return sub_menu;
 }

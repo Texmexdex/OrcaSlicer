@@ -253,6 +253,8 @@ set(lisbslic3r_sources
     Geometry/Bicubic.hpp
     Geometry/Circle.cpp
     Geometry/Circle.hpp
+    Geometry/ColorImageTracer.cpp
+    Geometry/ColorImageTracer.hpp
     Geometry/ConvexHull.cpp
     Geometry/ConvexHull.hpp
     Geometry.cpp
@@ -488,7 +490,7 @@ set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON CACHE BOOL "" FORCE)
 cmake_policy(PUSH)
 cmake_policy(SET CMP0011 NEW)
 find_package(CGAL REQUIRED)
-find_package(OpenCV REQUIRED core)
+find_package(OpenCV REQUIRED)
 cmake_policy(POP)
 
 add_library(libslic3r_cgal STATIC 
@@ -527,13 +529,13 @@ encoding_check(libslic3r)
 target_compile_definitions(libslic3r PUBLIC -DUSE_TBB -DTBB_USE_CAPTURED_EXCEPTION=0)
 # Make source directory PUBLIC so other modules (like libslic3r_gui) can include headers like SentryWrapper.hpp
 target_include_directories(libslic3r PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
+target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 
 # Find the OCCT and related libraries
 set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
-target_link_libraries(libslic3r PUBLIC nlohmann_json)
+target_link_libraries(libslic3r PUBLIC nlohmann_json opencv_world)
 
 find_package(JPEG REQUIRED)
 

@@ -20,7 +20,9 @@
 # therefore, unfortunatelly, the installation cannot be copied/moved elsewhere without re-installing wxWidgets.
 #
 
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.13)
+set(ENV{CMAKE_POLICY_VERSION_MINIMUM} "3.5")
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
 if (APPLE)
     # Require macOS 12.0+ (Monterey) as minimum version
     # All deps must use the same deployment target for consistent behavior
@@ -147,6 +149,7 @@ if (NOT IS_CROSS_COMPILE OR NOT APPLE)
         DOWNLOAD_DIR        ${DEP_DOWNLOAD_DIR}/${projectname}
         ${_gen}
         CMAKE_ARGS
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
             -DCMAKE_INSTALL_PREFIX:STRING=${DESTDIR}
             -DCMAKE_MODULE_PATH:STRING=${PROJECT_SOURCE_DIR}/../cmake/modules
             -DCMAKE_PREFIX_PATH:STRING=${DESTDIR}
@@ -204,6 +207,7 @@ else()
         DOWNLOAD_DIR        ${DEP_DOWNLOAD_DIR}/${projectname}
         ${_gen}
         CMAKE_ARGS
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
             -DCMAKE_INSTALL_PREFIX:STRING=${DESTDIR}
             -DCMAKE_PREFIX_PATH:STRING=${DESTDIR}
             -DBUILD_SHARED_LIBS:BOOL=OFF

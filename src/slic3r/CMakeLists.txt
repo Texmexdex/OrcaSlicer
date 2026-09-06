@@ -243,6 +243,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/I18N.hpp
     GUI/IconManager.cpp
     GUI/IconManager.hpp
+    GUI/ImageTraceDialog.cpp
+    GUI/ImageTraceDialog.hpp
     GUI/ImageGrid.cpp
     GUI/ImageGrid.h
     GUI/ImGuiWrapper.cpp

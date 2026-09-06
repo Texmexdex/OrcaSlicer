@@ -1,0 +1,555 @@
+#include "ImageTraceDialog.hpp"
+#include "slic3r/GUI/I18N.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/msgdlg.h>
+#include <wx/dcbuffer.h>
+#include <wx/stdpaths.h>
+#include <wx/filename.h>
+#include <wx/generic/gridctrl.h>
+
+#include <algorithm>
+#include <cmath>
+
+namespace Slic3r {
+namespace GUI {
+
+// ----------------------------------------------------------------------------
+// ImagePreviewCanvas Implementation
+// ----------------------------------------------------------------------------
+
+ImagePreviewCanvas::ImagePreviewCanvas(wxWindow* parent)
+    : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_THEME | wxFULL_REPAINT_ON_RESIZE)
+{
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    Bind(wxEVT_PAINT, &ImagePreviewCanvas::on_paint, this);
+    Bind(wxEVT_SIZE, &ImagePreviewCanvas::on_size, this);
+    Bind(wxEVT_ERASE_BACKGROUND, [](wxEraseEvent&) {}); // Prevent flicker
+}
+
+void ImagePreviewCanvas::set_original_image(const wxImage& img)
+{
+    m_original_img = img;
+    Refresh();
+}
+
+void ImagePreviewCanvas::set_quantized_image(const wxImage& img)
+{
+    m_quantized_img = img;
+    Refresh();
+}
+
+void ImagePreviewCanvas::set_mode(bool show_quantized)
+{
+    m_show_quantized = show_quantized;
+    Refresh();
+}
+
+void ImagePreviewCanvas::clear()
+{
+    m_original_img = wxImage();
+    m_quantized_img = wxImage();
+    Refresh();
+}
+
+void ImagePreviewCanvas::on_size(wxSizeEvent& evt)
+{
+    Refresh();
+    evt.Skip();
+}
+
+void ImagePreviewCanvas::on_paint(wxPaintEvent&)
+{
+    wxAutoBufferedPaintDC dc(this);
+    wxSize sz = GetClientSize();
+    if (sz.x <= 0 || sz.y <= 0) return;
+
+    // Dark sleek canvas background
+    dc.SetBackground(wxBrush(wxColour(28, 29, 33)));
+    dc.Clear();
+
+    const wxImage* active_img = nullptr;
+    if (m_show_quantized && m_quantized_img.IsOk()) {
+        active_img = &m_quantized_img;
+    } else if (m_original_img.IsOk()) {
+        active_img = &m_original_img;
+    } else if (m_quantized_img.IsOk()) {
+        active_img = &m_quantized_img;
+    }
+
+    if (active_img && active_img->IsOk() && active_img->GetWidth() > 0 && active_img->GetHeight() > 0) {
+        int iw = active_img->GetWidth();
+        int ih = active_img->GetHeight();
+        int avail_w = sz.x - 24;
+        int avail_h = sz.y - 24;
+
+        if (avail_w > 0 && avail_h > 0) {
+            double scale = std::min(static_cast<double>(avail_w) / iw, static_cast<double>(avail_h) / ih);
+            int tw = std::max(1, static_cast<int>(iw * scale));
+            int th = std::max(1, static_cast<int>(ih * scale));
+            int ox = (sz.x - tw) / 2;
+            int oy = (sz.y - th) / 2;
+
+            // Border outline
+            dc.SetPen(wxPen(wxColour(60, 64, 72), 1));
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
+            dc.DrawRectangle(ox - 1, oy - 1, tw + 2, th + 2);
+
+            wxImage scaled = active_img->Scale(tw, th, wxIMAGE_QUALITY_HIGH);
+            wxBitmap bmp(scaled);
+            dc.DrawBitmap(bmp, ox, oy, false);
+        }
+    } else {
+        // Placeholder instructions
+        dc.SetTextForeground(wxColour(145, 150, 160));
+        wxString msg = _L("Embedded Image Preview Window\n\n1. Select an image file (.png, .jpg, etc.)\n2. Click 'Trace & Preview'\n3. Segmented color layers will appear here");
+        wxCoord tw = 0, th = 0;
+        dc.GetMultiLineTextExtent(msg, &tw, &th);
+        dc.DrawText(msg, (sz.x - tw) / 2, (sz.y - th) / 2);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// ImageTraceDialog Implementation
+// ----------------------------------------------------------------------------
+
+static wxString get_default_stl_dir()
+{
+    wxString desktop_dir = wxStandardPaths::Get().GetUserDir(wxStandardPaths::Dir_Desktop);
+    if (desktop_dir.IsEmpty() || !wxDirExists(desktop_dir)) {
+        desktop_dir = wxGetHomeDir() + "\\Desktop";
+    }
+    return desktop_dir + "\\Orca_Traced_STLs";
+}
+
+ImageTraceDialog::ImageTraceDialog(wxWindow* parent)
+    : wxDialog(parent, wxID_ANY, _L("Native Image Vectorization & 3D Extrusion"),
+               wxDefaultPosition, wxSize(1060, 720),
+               wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+{
+    init_ui();
+    SetMinSize(wxSize(900, 600));
+}
+
+void ImageTraceDialog::init_ui()
+{
+    auto* main_sizer = new wxBoxSizer(wxVERTICAL);
+
+    // Side-by-side layout: Left settings & layers, Right preview canvas
+    auto* content_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+    // ==========================================
+    // Left Pane (Parameters & Layer Grid)
+    // ==========================================
+    auto* left_sizer = new wxBoxSizer(wxVERTICAL);
+
+    // 1. Parameter Settings Group
+    auto* settings_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Tracing Parameters"));
+    auto* grid_sizer = new wxFlexGridSizer(6, 2, 6, 10);
+    grid_sizer->AddGrowableCol(1, 1);
+
+    // Input Image File Selector
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Input Image:")), 0, wxALIGN_CENTER_VERTICAL);
+    m_file_picker = new wxFilePickerCtrl(
+        settings_box->GetStaticBox(), wxID_ANY, wxEmptyString,
+        _L("Select raster image to trace"),
+        _L("Image Files (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp"),
+        wxDefaultPosition, wxDefaultSize,
+        wxFLP_OPEN | wxFLP_FILE_MUST_EXIST | wxFLP_USE_TEXTCTRL);
+    m_file_picker->Bind(wxEVT_FILEPICKER_CHANGED, &ImageTraceDialog::on_file_changed, this);
+    grid_sizer->Add(m_file_picker, 1, wxEXPAND);
+
+    // Color Cluster Count (K)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Color Clusters (K):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_k = new wxSpinCtrl(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 2, 16, 4);
+    grid_sizer->Add(m_spin_k, 0, wxEXPAND);
+
+    // Bed Target Width (mm)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Bed Target Width (mm):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_width = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1.0, 1000.0, 100.0, 1.0);
+    grid_sizer->Add(m_spin_width, 0, wxEXPAND);
+
+    // Default Base Height (mm)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Default Height (mm):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_height = new wxSpinCtrlDouble(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0.1, 200.0, 2.0, 0.2);
+    grid_sizer->Add(m_spin_height, 0, wxEXPAND);
+
+    // Minimum Area Filter (pixels)
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Min Area Filter (px):")), 0, wxALIGN_CENTER_VERTICAL);
+    m_spin_min_area = new wxSpinCtrl(settings_box->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100000, 50);
+    grid_sizer->Add(m_spin_min_area, 0, wxEXPAND);
+
+    // STL Export Directory
+    grid_sizer->Add(new wxStaticText(settings_box->GetStaticBox(), wxID_ANY, _L("Save STLs To:")), 0, wxALIGN_CENTER_VERTICAL);
+    m_dir_picker = new wxDirPickerCtrl(
+        settings_box->GetStaticBox(), wxID_ANY, get_default_stl_dir(),
+        _L("Select directory to save STL component files"),
+        wxDefaultPosition, wxDefaultSize,
+        wxDIRP_DIR_MUST_EXIST | wxDIRP_USE_TEXTCTRL);
+    grid_sizer->Add(m_dir_picker, 1, wxEXPAND);
+
+    settings_box->Add(grid_sizer, 0, wxEXPAND | wxALL, 6);
+
+    // Action button to trigger trace
+    m_btn_trace = new wxButton(settings_box->GetStaticBox(), wxID_ANY, _L("Trace & Preview"));
+    m_btn_trace->Bind(wxEVT_BUTTON, &ImageTraceDialog::on_trace, this);
+    settings_box->Add(m_btn_trace, 0, wxALIGN_RIGHT | wxALL, 6);
+
+    left_sizer->Add(settings_box, 0, wxEXPAND | wxALL, 6);
+
+    // 2. Detected Layers Grid
+    auto* layers_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Detected Color Layers"));
+
+    m_grid = new wxGrid(layers_box->GetStaticBox(), wxID_ANY);
+    m_grid->CreateGrid(0, 5);
+    m_grid->SetColLabelValue(0, _L("Color Swatch"));
+    m_grid->SetColLabelValue(1, _L("Extruder"));
+    m_grid->SetColLabelValue(2, _L("Height (mm)"));
+    m_grid->SetColLabelValue(3, _L("Negative"));
+    m_grid->SetColLabelValue(4, _L("Active"));
+
+    m_grid->SetColSize(0, 85);
+    m_grid->SetColSize(1, 75);
+    m_grid->SetColSize(2, 85);
+    m_grid->SetColSize(3, 85);
+    m_grid->SetColSize(4, 60);
+
+    layers_box->Add(m_grid, 1, wxEXPAND | wxALL, 4);
+    left_sizer->Add(layers_box, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+
+    content_sizer->Add(left_sizer, 0, wxEXPAND | wxRIGHT, 6);
+
+    // ==========================================
+    // Right Pane (Dedicated Canvas View Window)
+    // ==========================================
+    auto* preview_box = new wxStaticBoxSizer(wxVERTICAL, this, _L("Canvas Preview (Separate View Window)"));
+
+    // Preview Mode Header Toolbar
+    auto* header_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_radio_quantized = new wxRadioButton(preview_box->GetStaticBox(), wxID_ANY, _L("Quantized Colors"), wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
+    m_radio_original  = new wxRadioButton(preview_box->GetStaticBox(), wxID_ANY, _L("Original Image"));
+    m_radio_quantized->SetValue(true);
+
+    m_radio_quantized->Bind(wxEVT_RADIOBUTTON, &ImageTraceDialog::on_view_mode_changed, this);
+    m_radio_original->Bind(wxEVT_RADIOBUTTON, &ImageTraceDialog::on_view_mode_changed, this);
+
+    header_sizer->Add(m_radio_quantized, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+    header_sizer->Add(m_radio_original, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 15);
+
+    m_lbl_preview_info = new wxStaticText(preview_box->GetStaticBox(), wxID_ANY, _L("No image loaded"));
+    m_lbl_preview_info->SetForegroundColour(wxColour(120, 125, 135));
+    header_sizer->Add(m_lbl_preview_info, 1, wxALIGN_CENTER_VERTICAL);
+
+    preview_box->Add(header_sizer, 0, wxEXPAND | wxALL, 6);
+
+    // Embedded Preview Canvas
+    m_preview_canvas = new ImagePreviewCanvas(preview_box->GetStaticBox());
+    preview_box->Add(m_preview_canvas, 1, wxEXPAND | wxALL, 4);
+
+    content_sizer->Add(preview_box, 1, wxEXPAND | wxLEFT, 6);
+
+    main_sizer->Add(content_sizer, 1, wxEXPAND | wxALL, 8);
+
+    // ==========================================
+    // 3. Dialog Bottom Buttons (Export / OK / Cancel)
+    // ==========================================
+    auto* bottom_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+    auto* btn_export_only = new wxButton(this, wxID_ANY, _L("Export STLs Only"));
+    btn_export_only->Bind(wxEVT_BUTTON, &ImageTraceDialog::on_export_only, this);
+    bottom_sizer->Add(btn_export_only, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
+
+    bottom_sizer->AddStretchSpacer(1);
+
+    auto* ok_btn = new wxButton(this, wxID_OK, _L("Save STLs & Import to Plate"));
+    ok_btn->SetDefault();
+    auto* cancel_btn = new wxButton(this, wxID_CANCEL, _L("Cancel"));
+
+    bottom_sizer->Add(ok_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+    bottom_sizer->Add(cancel_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+
+    ok_btn->Bind(wxEVT_BUTTON, &ImageTraceDialog::on_ok, this);
+
+    main_sizer->Add(bottom_sizer, 0, wxEXPAND | wxALL, 8);
+
+    SetSizer(main_sizer);
+    Layout();
+    CentreOnParent();
+}
+
+void ImageTraceDialog::on_file_changed(wxFileDirPickerEvent&)
+{
+    wxString path = m_file_picker->GetPath();
+    if (path.IsEmpty() || !wxFileExists(path)) {
+        m_preview_canvas->clear();
+        m_lbl_preview_info->SetLabel(_L("No image loaded"));
+        return;
+    }
+
+    wxImage img;
+    if (img.LoadFile(path)) {
+        m_preview_canvas->set_original_image(img);
+        m_preview_canvas->set_mode(false);
+        m_radio_original->SetValue(true);
+        m_lbl_preview_info->SetLabel(wxString::Format(_L("Original Image: %d x %d px"), img.GetWidth(), img.GetHeight()));
+    }
+}
+
+void ImageTraceDialog::on_view_mode_changed(wxCommandEvent&)
+{
+    bool show_quantized = m_radio_quantized->GetValue();
+    m_preview_canvas->set_mode(show_quantized);
+}
+
+void ImageTraceDialog::on_trace(wxCommandEvent&)
+{
+    wxString path = m_file_picker->GetPath();
+    if (path.IsEmpty() || !wxFileExists(path)) {
+        wxMessageBox(_L("Please select a valid raster image file."), _L("File Error"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    int k_clusters = m_spin_k->GetValue();
+    double width_mm = m_spin_width->GetValue();
+    int min_area_px = m_spin_min_area->GetValue();
+    double default_height = m_spin_height->GetValue();
+
+    wxBusyCursor wait;
+    std::vector<unsigned char> preview_rgb;
+    int preview_w = 0;
+    int preview_h = 0;
+
+    bool success = ColorImageTracer::process_image(
+        std::string(path.ToUTF8()),
+        k_clusters,
+        width_mm,
+        min_area_px,
+        m_layers,
+        &preview_rgb,
+        &preview_w,
+        &preview_h);
+
+    if (!success || m_layers.empty()) {
+        wxMessageBox(_L("Failed to trace contours from image. Check image format and parameters."),
+                     _L("Trace Error"), wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    // Update preview canvas with quantized segmentation
+    if (preview_w > 0 && preview_h > 0 && !preview_rgb.empty()) {
+        wxImage q_img(preview_w, preview_h);
+        memcpy(q_img.GetData(), preview_rgb.data(), static_cast<size_t>(preview_w) * preview_h * 3);
+        m_preview_canvas->set_quantized_image(q_img);
+        m_preview_canvas->set_mode(true);
+        m_radio_quantized->SetValue(true);
+        m_lbl_preview_info->SetLabel(wxString::Format(_L("Quantized (%d layers): %d x %d px"),
+            static_cast<int>(m_layers.size()), preview_w, preview_h));
+    }
+
+    // Apply default base height to all layers
+    for (auto& layer : m_layers) {
+        layer.height_mm = default_height;
+        ColorImageTracer::extrude_layer(layer);
+    }
+
+    // Populate wxGrid
+    if (m_grid->GetNumberRows() > 0) {
+        m_grid->DeleteRows(0, m_grid->GetNumberRows());
+    }
+
+    m_grid->AppendRows(static_cast<int>(m_layers.size()));
+
+    for (int i = 0; i < static_cast<int>(m_layers.size()); ++i) {
+        const auto& layer = m_layers[i];
+
+        // Column 0: Visual Color Swatch
+        m_grid->SetCellValue(i, 0, wxEmptyString);
+        m_grid->SetCellBackgroundColour(i, 0, wxColour(layer.r, layer.g, layer.b));
+        m_grid->SetReadOnly(i, 0, true);
+
+        // Column 1: Extruder Assignment (1 to 16)
+        m_grid->SetCellEditor(i, 1, new wxGridCellNumberEditor(1, 16));
+        m_grid->SetCellRenderer(i, 1, new wxGridCellNumberRenderer());
+        m_grid->SetCellValue(i, 1, wxString::Format("%d", layer.extruder_id));
+
+        // Column 2: Layer Extrusion Height (mm)
+        m_grid->SetCellEditor(i, 2, new wxGridCellFloatEditor(4, 2));
+        m_grid->SetCellRenderer(i, 2, new wxGridCellFloatRenderer(4, 2));
+        m_grid->SetCellValue(i, 2, wxString::Format("%.2f", layer.height_mm));
+
+        // Column 3: Part Type ("Part" vs "Negative Volume / Cutter")
+        m_grid->SetCellEditor(i, 3, new wxGridCellBoolEditor());
+        m_grid->SetCellRenderer(i, 3, new wxGridCellBoolRenderer());
+        m_grid->SetCellValue(i, 3, layer.is_negative ? "1" : "0");
+
+        // Column 4: Enabled/Active checkbox
+        m_grid->SetCellEditor(i, 4, new wxGridCellBoolEditor());
+        m_grid->SetCellRenderer(i, 4, new wxGridCellBoolRenderer());
+        m_grid->SetCellValue(i, 4, "1");
+    }
+
+    m_grid->Refresh();
+}
+
+bool ImageTraceDialog::save_stls()
+{
+    if (m_layers.empty()) return false;
+
+    wxString base_dir = m_dir_picker->GetPath();
+    if (base_dir.IsEmpty()) {
+        base_dir = get_default_stl_dir();
+    }
+
+    if (!wxDirExists(base_dir)) {
+        wxFileName::Mkdir(base_dir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+    }
+
+    wxFileName src_fn(m_file_picker->GetPath());
+    wxString img_name = src_fn.GetName();
+    if (img_name.IsEmpty()) {
+        img_name = "Traced_Image";
+    }
+
+    wxString img_folder = base_dir + "\\" + img_name;
+    if (!wxDirExists(img_folder)) {
+        wxFileName::Mkdir(img_folder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+    }
+
+    m_exported_stl_paths.clear();
+
+    for (size_t i = 0; i < m_layers.size(); ++i) {
+        if (m_layers[i].mesh.empty()) continue;
+
+        wxString filename = wxString::Format("%s_part_%d_rgb%02X%02X%02X.stl",
+            img_name,
+            static_cast<int>(i + 1),
+            m_layers[i].r, m_layers[i].g, m_layers[i].b);
+        wxString fullpath = img_folder + "\\" + filename;
+
+        std::string path_u8 = std::string(fullpath.ToUTF8());
+        if (its_write_stl_binary(path_u8.c_str(), "", m_layers[i].mesh)) {
+            m_exported_stl_paths.push_back(path_u8);
+        }
+    }
+
+    return !m_exported_stl_paths.empty();
+}
+
+void ImageTraceDialog::on_export_only(wxCommandEvent&)
+{
+    if (m_grid->IsCellEditControlEnabled()) {
+        m_grid->DisableCellEditControl();
+    }
+    m_grid->SaveEditControlValue();
+
+    if (m_layers.empty() || m_grid->GetNumberRows() == 0) {
+        wxMessageBox(_L("No layers detected. Please trace an image first."),
+                     _L("Validation Error"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    // Sync active layers and heights from grid
+    std::vector<ColorTraceLayer> active_layers;
+    for (int i = 0; i < static_cast<int>(m_layers.size()) && i < m_grid->GetNumberRows(); ++i) {
+        wxString active_val = m_grid->GetCellValue(i, 4);
+        bool is_active = (active_val == "1" || active_val.Lower() == "true");
+        if (!is_active) continue;
+
+        double h = 2.0;
+        m_grid->GetCellValue(i, 2).ToDouble(&h);
+        if (h <= 0.0) h = 0.2;
+
+        if (std::abs(m_layers[i].height_mm - h) > 0.001) {
+            m_layers[i].height_mm = h;
+            ColorImageTracer::extrude_layer(m_layers[i]);
+        }
+
+        if (!m_layers[i].mesh.empty()) {
+            active_layers.push_back(m_layers[i]);
+        }
+    }
+
+    if (active_layers.empty()) {
+        wxMessageBox(_L("Please enable at least one active layer to export."),
+                     _L("Validation Error"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    m_layers = std::move(active_layers);
+
+    if (save_stls()) {
+        wxString folder = wxPathOnly(m_exported_stl_paths.front());
+        wxMessageBox(wxString::Format(_L("Successfully exported %d STL component files to:\n%s"),
+                                      static_cast<int>(m_exported_stl_paths.size()), folder),
+                     _L("Export Successful"), wxOK | wxICON_INFORMATION, this);
+    } else {
+        wxMessageBox(_L("Failed to save STL files to disk. Check folder write permissions."),
+                     _L("Export Error"), wxOK | wxICON_ERROR, this);
+    }
+}
+
+void ImageTraceDialog::on_ok(wxCommandEvent&)
+{
+    if (m_grid->IsCellEditControlEnabled()) {
+        m_grid->DisableCellEditControl();
+    }
+    m_grid->SaveEditControlValue();
+
+    if (m_layers.empty() || m_grid->GetNumberRows() == 0) {
+        wxMessageBox(_L("No layers detected. Please trace an image first."),
+                     _L("Validation Error"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    std::vector<ColorTraceLayer> active_layers;
+    for (int i = 0; i < static_cast<int>(m_layers.size()) && i < m_grid->GetNumberRows(); ++i) {
+        wxString active_val = m_grid->GetCellValue(i, 4);
+        bool is_active = (active_val == "1" || active_val.Lower() == "true");
+        if (!is_active) {
+            continue;
+        }
+
+        long ext_id = 1;
+        m_grid->GetCellValue(i, 1).ToLong(&ext_id);
+        m_layers[i].extruder_id = std::clamp(static_cast<int>(ext_id), 1, 16);
+
+        double h = 2.0;
+        m_grid->GetCellValue(i, 2).ToDouble(&h);
+        if (h <= 0.0) h = 0.2;
+
+        wxString neg_val = m_grid->GetCellValue(i, 3);
+        m_layers[i].is_negative = (neg_val == "1" || neg_val.Lower() == "true");
+
+        // Re-extrude if height changed
+        if (std::abs(m_layers[i].height_mm - h) > 0.001) {
+            m_layers[i].height_mm = h;
+            ColorImageTracer::extrude_layer(m_layers[i]);
+        }
+
+        if (!m_layers[i].mesh.empty()) {
+            active_layers.push_back(m_layers[i]);
+        }
+    }
+
+    if (active_layers.empty()) {
+        wxMessageBox(_L("Please enable at least one active layer to add to the build plate."),
+                     _L("Validation Error"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    m_layers = std::move(active_layers);
+
+    if (!save_stls()) {
+        wxMessageBox(_L("Failed to save STL files to disk. Check folder write permissions."),
+                     _L("Export Error"), wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    EndModal(wxID_OK);
+}
+
+} // namespace GUI
+} // namespace Slic3r

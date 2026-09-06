@@ -2620,6 +2620,9 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(import_menu, wxID_ANY, _L("Import Zip Archive") + dots, _L("Load models contained within a zip archive"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->import_zip_archive(); }, "menu_import", nullptr,
             [this]() { return can_add_models(); });
+        append_menu_item(import_menu, wxID_ANY, _L("Trace Raster Image...") + dots, _L("Trace raster image and generate 3D multi-color assembly"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->load_image_trace(); }, "menu_import", nullptr,
+            [this]() { return can_add_models(); });
         append_menu_item(import_menu, wxID_ANY, _L("Import Configs") + dots /*+ "\t" + ctrl + "I"*/, _L("Load configs"),
             [this](wxCommandEvent&) { load_config_file(); }, "menu_import", nullptr,
             [this](){return true; }, this);
